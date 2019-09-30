@@ -353,22 +353,102 @@ int LZ4_decompress_safe(const char *source, char *dest,
 		noDict, (BYTE *)dest, NULL, 0);
 }
 
-int LZ4_decompress_safe_partial(const char *source, char *dest,
-	int compressedSize, int targetOutputSize, int maxDecompressedSize)
+static int LZ4_decompress_safe_partial(const char *src, char *dst,
+	int compressedSize, int targetOutputSize, int dstCapacity)
 {
-	return LZ4_decompress_generic(source, dest, compressedSize,
-		maxDecompressedSize, endOnInputSize, partial,
-		targetOutputSize, noDict, (BYTE *)dest, NULL, 0);
+	dstCapacity = min(targetOutputSize, dstCapacity);
+	return LZ4_decompress_generic(src, dst, compressedSize, dstCapacity,
+				      endOnInputSize, partial_decode,
+				      noDict, (BYTE *)dst, NULL, 0);
 }
 
 int LZ4_decompress_fast(const char *source, char *dest, int originalSize)
 {
 	return LZ4_decompress_generic(source, dest, 0, originalSize,
-		endOnOutputSize, full, 0, withPrefix64k,
-		(BYTE *)(dest - 64 * KB), NULL, 64 * KB);
+				      endOnOutputSize, decode_full_block,
+				      withPrefix64k,
+				      (BYTE *)dest - 64 * KB, NULL, 0);
 }
 
-int LZ4_setStreamDecode(LZ4_streamDecode_t *LZ4_streamDecode,
+/* ===== Instantiate a few more decoding cases, used more than once. ===== */
+
+static int LZ4_decompress_safe_withPrefix64k(const char *source, char *dest,
+				      int compressedSize, int maxOutputSize)
+{
+	return LZ4_decompress_generic(source, dest,
+				      compressedSize, maxOutputSize,
+				      endOnInputSize, decode_full_block,
+				      withPrefix64k,
+				      (BYTE *)dest - 64 * KB, NULL, 0);
+}
+
+static int LZ4_decompress_safe_withSmallPrefix(const char *source, char *dest,
+					       int compressedSize,
+					       int maxOutputSize,
+					       size_t prefixSize)
+{
+	return LZ4_decompress_generic(source, dest,
+				      compressedSize, maxOutputSize,
+				      endOnInputSize, decode_full_block,
+				      noDict,
+				      (BYTE *)dest - prefixSize, NULL, 0);
+}
+
+static int LZ4_decompress_safe_forceExtDict(const char *source, char *dest,
+				     int compressedSize, int maxOutputSize,
+				     const void *dictStart, size_t dictSize)
+{
+	return LZ4_decompress_generic(source, dest,
+				      compressedSize, maxOutputSize,
+				      endOnInputSize, decode_full_block,
+				      usingExtDict, (BYTE *)dest,
+				      (const BYTE *)dictStart, dictSize);
+}
+
+static int LZ4_decompress_fast_extDict(const char *source, char *dest,
+				       int originalSize,
+				       const void *dictStart, size_t dictSize)
+{
+	return LZ4_decompress_generic(source, dest,
+				      0, originalSize,
+				      endOnOutputSize, decode_full_block,
+				      usingExtDict, (BYTE *)dest,
+				      (const BYTE *)dictStart, dictSize);
+}
+
+/*
+ * The "double dictionary" mode, for use with e.g. ring buffers: the first part
+ * of the dictionary is passed as prefix, and the second via dictStart + dictSize.
+ * These routines are used only once, in LZ4_decompress_*_continue().
+ */
+static FORCE_INLINE
+int LZ4_decompress_safe_doubleDict(const char *source, char *dest,
+				   int compressedSize, int maxOutputSize,
+				   size_t prefixSize,
+				   const void *dictStart, size_t dictSize)
+{
+	return LZ4_decompress_generic(source, dest,
+				      compressedSize, maxOutputSize,
+				      endOnInputSize, decode_full_block,
+				      usingExtDict, (BYTE *)dest - prefixSize,
+				      (const BYTE *)dictStart, dictSize);
+}
+
+static FORCE_INLINE
+int LZ4_decompress_fast_doubleDict(const char *source, char *dest,
+				   int originalSize, size_t prefixSize,
+				   const void *dictStart, size_t dictSize)
+{
+	return LZ4_decompress_generic(source, dest,
+				      0, originalSize,
+				      endOnOutputSize, decode_full_block,
+				      usingExtDict, (BYTE *)dest - prefixSize,
+				      (const BYTE *)dictStart, dictSize);
+}
+
+/* ===== streaming decompression functions ===== */
+
+static int LZ4_setStreamDecode(LZ4_streamDecode_t *LZ4_streamDecode,
 	const char *dictionary, int dictSize)
 {
 	LZ4_streamDecode_t_internal *lz4sd = (LZ4_streamDecode_t_internal *) LZ4_streamDecode;
@@ -390,7 +470,7 @@ int LZ4_setStreamDecode(LZ4_streamDecode_t *LZ4_streamDecode,
  * decoded data into a safe buffer,
  * and indicate where it stands using LZ4_setStreamDecode()
  */
-int LZ4_decompress_safe_continue(LZ4_streamDecode_t *LZ4_streamDecode,
+static int LZ4_decompress_safe_continue(LZ4_streamDecode_t *LZ4_streamDecode,
 	const char *source, char *dest, int compressedSize, int maxOutputSize)
 {
 	LZ4_streamDecode_t_internal *lz4sd = &LZ4_streamDecode->internal_donotuse;
@@ -427,7 +507,7 @@ int LZ4_decompress_safe_continue(LZ4_streamDecode_t *LZ4_streamDecode,
 	return result;
 }
 
-int LZ4_decompress_fast_continue(LZ4_streamDecode_t *LZ4_streamDecode,
+static int LZ4_decompress_fast_continue(LZ4_streamDecode_t *LZ4_streamDecode,
 	const char *source, char *dest, int originalSize)
 {
 	LZ4_streamDecode_t_internal *lz4sd = &LZ4_streamDecode->internal_donotuse;
@@ -489,31 +569,23 @@ static FORCE_INLINE int LZ4_decompress_usingDict_generic(const char *source,
 		(BYTE *)dest, (const BYTE *)dictStart, dictSize);
 }
 
-int LZ4_decompress_safe_usingDict(const char *source, char *dest,
-	int compressedSize, int maxOutputSize,
-	const char *dictStart, int dictSize)
+static int LZ4_decompress_safe_usingDict(const char *source, char *dest,
+				  int compressedSize, int maxOutputSize,
+				  const char *dictStart, int dictSize)
 {
 	return LZ4_decompress_usingDict_generic(source, dest,
 		compressedSize, maxOutputSize, 1, dictStart, dictSize);
 }
 
-int LZ4_decompress_fast_usingDict(const char *source, char *dest,
-	int originalSize, const char *dictStart, int dictSize)
+static int LZ4_decompress_fast_usingDict(const char *source, char *dest,
+				  int originalSize,
+				  const char *dictStart, int dictSize)
 {
 	return LZ4_decompress_usingDict_generic(source, dest, 0,
 		originalSize, 0, dictStart, dictSize);
 }
 
 #ifndef STATIC
-EXPORT_SYMBOL(LZ4_decompress_safe);
-EXPORT_SYMBOL(LZ4_decompress_safe_partial);
-EXPORT_SYMBOL(LZ4_decompress_fast);
-EXPORT_SYMBOL(LZ4_setStreamDecode);
-EXPORT_SYMBOL(LZ4_decompress_safe_continue);
-EXPORT_SYMBOL(LZ4_decompress_fast_continue);
-EXPORT_SYMBOL(LZ4_decompress_safe_usingDict);
-EXPORT_SYMBOL(LZ4_decompress_fast_usingDict);
-
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_DESCRIPTION("LZ4 decompressor");
 #endif
