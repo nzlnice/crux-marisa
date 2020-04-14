@@ -1130,32 +1130,6 @@ static DEVICE_ATTR_RO(bd_stat);
 #endif
 static DEVICE_ATTR_RO(debug_stat);
 
-static struct zram_entry *zram_entry_alloc(struct zram *zram,
-					   unsigned int len, gfp_t flags)
-{
-	struct zram_entry *entry;
-
-	entry = kzalloc(sizeof(*entry),
-			flags & ~(__GFP_HIGHMEM|__GFP_MOVABLE|__GFP_CMA));
-	if (!entry)
-		return NULL;
-
-	entry->handle = zs_malloc(zram->mem_pool, len, flags);
-	if (!entry->handle) {
-		kfree(entry);
-		return NULL;
-	}
-
-	return entry;
-}
-
-static inline void zram_entry_free(struct zram *zram,
-				   struct zram_entry *entry)
-{
-	zs_free(zram->mem_pool, entry->handle);
-	kfree(entry);
-}
-
 static void zram_meta_free(struct zram *zram, u64 disksize)
 {
 	size_t num_pages = disksize >> PAGE_SHIFT;
@@ -1278,7 +1252,7 @@ static int __zram_bvec_read(struct zram *zram, struct page *page, u32 index,
 
 	size = zram_get_obj_size(zram, index);
 
-	src = zs_map_object(zram->mem_pool, entry->handle, ZS_MM_RO);
+	src = zs_map_object(zram->mem_pool, handle, ZS_MM_RO);
 	if (size == PAGE_SIZE) {
 		dst = kmap_atomic(page);
 		memcpy(dst, src, PAGE_SIZE);
@@ -1292,7 +1266,7 @@ static int __zram_bvec_read(struct zram *zram, struct page *page, u32 index,
 		kunmap_atomic(dst);
 		zcomp_stream_put(zram->comp);
 	}
-	zs_unmap_object(zram->mem_pool, entry->handle);
+	zs_unmap_object(zram->mem_pool, handle);
 	zram_slot_unlock(zram, index);
 
 	/* Should NEVER happen. Return bio error if it does. */
@@ -1413,7 +1387,7 @@ compress_again:
 		return -ENOMEM;
 	}
 
-	dst = zs_map_object(zram->mem_pool, entry->handle, ZS_MM_WO);
+	dst = zs_map_object(zram->mem_pool, handle, ZS_MM_WO);
 
 	src = zstrm->buffer;
 	if (comp_len == PAGE_SIZE)
@@ -1423,7 +1397,7 @@ compress_again:
 		kunmap_atomic(src);
 
 	zcomp_stream_put(zram->comp);
-	zs_unmap_object(zram->mem_pool, entry->handle);
+	zs_unmap_object(zram->mem_pool, handle);
 	atomic64_add(comp_len, &zram->stats.compr_data_size);
 out:
 	/*
