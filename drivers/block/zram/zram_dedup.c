@@ -104,7 +104,7 @@ static unsigned long zram_dedup_put(struct zram *zram,
 
 	spin_unlock(&hash->lock);
 
-	return val;
+	return entry->refcount;
 }
 
 static struct zram_entry *zram_dedup_get(struct zram *zram,
