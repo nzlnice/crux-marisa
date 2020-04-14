@@ -56,6 +56,10 @@ enum zram_pageflags {
 
 /*-- Data structures */
 
+struct zram_entry {
+	unsigned long handle;
+};
+
 /* Allocated for each disk page */
 struct zram_table_entry {
 	union {
@@ -132,6 +136,4 @@ struct zram {
 	struct dentry *debugfs_dir;
 #endif
 };
-
-void zram_entry_free(struct zram *zram, struct zram_entry *entry);
 #endif

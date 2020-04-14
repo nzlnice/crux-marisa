@@ -1134,34 +1134,26 @@ static struct zram_entry *zram_entry_alloc(struct zram *zram,
 					   unsigned int len, gfp_t flags)
 {
 	struct zram_entry *entry;
-	unsigned long handle;
 
 	entry = kzalloc(sizeof(*entry),
 			flags & ~(__GFP_HIGHMEM|__GFP_MOVABLE|__GFP_CMA));
 	if (!entry)
 		return NULL;
 
-	handle = zs_malloc(zram->mem_pool, len, flags);
-	if (!handle) {
+	entry->handle = zs_malloc(zram->mem_pool, len, flags);
+	if (!entry->handle) {
 		kfree(entry);
 		return NULL;
 	}
 
-	zram_dedup_init_entry(zram, entry, handle, len);
-	atomic64_add(sizeof(*entry), &zram->stats.meta_data_size);
-
 	return entry;
 }
 
-void zram_entry_free(struct zram *zram, struct zram_entry *entry)
+static inline void zram_entry_free(struct zram *zram,
+				   struct zram_entry *entry)
 {
-	if (!zram_dedup_put_entry(zram, entry))
-		return;
-
 	zs_free(zram->mem_pool, entry->handle);
 	kfree(entry);
-
-	atomic64_sub(sizeof(*entry), &zram->stats.meta_data_size);
 }
 
 static void zram_meta_free(struct zram *zram, u64 disksize)
