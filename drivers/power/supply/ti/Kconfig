@@ -1,5 +1,10 @@
 menu "TI Technologies, Inc. Charger support"
 
+config FUEL_GAUGE_BQ27Z561
+	tristate "TI bq27z561 battery gauge driver"
+	help
+	  Say Y to enable support for TI bq27z561 fuel gauge driver
+
 config BQ2597X_CHARGE_PUMP
 	tristate "BQ2597X power supply framework based driver"
 	depends on I2C
