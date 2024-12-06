@@ -1481,6 +1481,8 @@ static int dwc3_probe(struct platform_device *pdev)
 
 	pm_runtime_allow(dev);
 	dwc3_debugfs_init(dwc);
+	dma_set_max_seg_size(dev, UINT_MAX);
+
 	return 0;
 
 err3:
@@ -1517,6 +1519,7 @@ static int dwc3_remove(struct platform_device *pdev)
 	dwc3_debugfs_exit(dwc);
 	dwc3_gadget_exit(dwc);
 
+	pm_runtime_allow(&pdev->dev);
 	pm_runtime_allow(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
 	pm_runtime_put_noidle(&pdev->dev);
