@@ -4572,8 +4572,13 @@ static void __netif_receive_skb_list(struct list_head *head)
 
 			/* Handle the previous sublist */
 			list_cut_before(&sublist, head, &skb->list);
-			if (!list_empty(&sublist))
-				__netif_receive_skb_list_core(&sublist, pfmemalloc);
+			if (!list_empty(&sublist)) {
+				struct sk_buff *nskb, *nnext;
+				list_for_each_entry_safe(nskb, nnext, &sublist, list) {
+					list_del(&nskb->list);
+					__netif_receive_skb_core(nskb, pfmemalloc);
+				}
+			}
 			pfmemalloc = !pfmemalloc;
 			/* See comments in __netif_receive_skb */
 			if (pfmemalloc)
@@ -4583,8 +4588,13 @@ static void __netif_receive_skb_list(struct list_head *head)
 		}
 	}
 	/* Handle the remaining sublist */
-	if (!list_empty(head))
-		__netif_receive_skb_list_core(head, pfmemalloc);
+	if (!list_empty(head)) {
+		struct sk_buff *nskb, *nnext;
+		list_for_each_entry_safe(nskb, nnext, head, list) {
+			list_del(&nskb->list);
+			__netif_receive_skb_core(nskb, pfmemalloc);
+		}
+	}
 	/* Restore pflags */
 	if (pfmemalloc)
 		memalloc_noreclaim_restore(noreclaim_flag);
