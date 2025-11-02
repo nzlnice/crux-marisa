@@ -160,8 +160,16 @@ static inline void erofs_workgroup_unfreeze(struct erofs_workgroup *grp,
 
 static inline int erofs_wait_on_workgroup_freezed(struct erofs_workgroup *grp)
 {
-	return atomic_cond_read_relaxed(&grp->refcount,
-					VAL != EROFS_LOCKED_MAGIC);
+	int v;
+	
+	do {
+		v = atomic_read(&grp->refcount);
+		if (v != EROFS_LOCKED_MAGIC)
+			break;
+		cpu_relax();
+	} while (1);
+	
+	return v;
 }
 #else
 static inline bool erofs_workgroup_try_to_freeze(struct erofs_workgroup *grp,
