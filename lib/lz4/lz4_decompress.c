@@ -331,7 +331,7 @@ static FORCE_INLINE int
 __LZ4_decompress_generic(const char *const src, char *const dst, const BYTE * ip, BYTE * op, int srcSize,
 		       /*
 		 * If endOnInput == endOnInputSize,
-		 * this value is the max size of Output Buffer.
+		 * this value is `dstCapacity`
 		 */
 		       int outputSize,
 		       /* endOnOutputSize, endOnInputSize */
@@ -1120,8 +1120,8 @@ EXPORT_SYMBOL(LZ4_decompress_safe);
 EXPORT_SYMBOL(LZ4_decompress_safe_partial);
 EXPORT_SYMBOL(LZ4_setStreamDecode);
 EXPORT_SYMBOL(LZ4_decompress_safe_continue);
-EXPORT_SYMBOL(LZ4_armv8_decompress_safe);
-EXPORT_SYMBOL(LZ4_armv8_decompress_safe_partial);
+EXPORT_SYMBOL(LZ4_arm64_decompress_safe);          
+EXPORT_SYMBOL(LZ4_arm64_decompress_safe_partial);  
 
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_DESCRIPTION("LZ4 decompressor");
