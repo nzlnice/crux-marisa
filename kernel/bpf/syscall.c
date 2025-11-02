@@ -24,6 +24,9 @@
 #include <linux/version.h>
 #include <linux/kernel.h>
 #include <linux/idr.h>
+#include <linux/cred.h>
+#include <linux/timekeeping.h>
+#include <linux/ctype.h>
 
 #define IS_FD_ARRAY(map) ((map)->map_type == BPF_MAP_TYPE_PROG_ARRAY || \
 			   (map)->map_type == BPF_MAP_TYPE_PERF_EVENT_ARRAY || \
@@ -354,7 +357,6 @@ int bpf_get_file_flag(int flags)
 		   offsetof(union bpf_attr, CMD##_LAST_FIELD) - \
 		   sizeof(attr->CMD##_LAST_FIELD)) != NULL
 
-#define BPF_MAP_CREATE_LAST_FIELD numa_node
 /* dst and src must have at least BPF_OBJ_NAME_LEN number of bytes.
  * Return 0 on success and < 0 on error.
  */
@@ -1253,6 +1255,11 @@ static int bpf_prog_load(union bpf_attr *attr)
 	if (err < 0)
 		goto free_prog;
 
+	prog->aux->load_time = ktime_get_boot_ns();
+	err = bpf_obj_name_cpy(prog->aux->name, attr->prog_name);
+	if (err)
+		goto free_prog;
+
 	/* run eBPF verifier */
 	err = bpf_check(&prog, attr);
 	if (err < 0)
@@ -1676,6 +1683,9 @@ static int bpf_prog_get_info_by_fd(struct bpf_prog *prog,
 
 	info.type = prog->type;
 	info.id = prog->aux->id;
+	info.load_time = prog->aux->load_time;
+	info.created_by_uid = from_kuid_munged(current_user_ns(),
+					       prog->aux->user->uid);
 
 	memcpy(info.tag, prog->tag, sizeof(prog->tag));
 	memcpy(info.name, prog->aux->name, sizeof(prog->aux->name));
