@@ -231,9 +231,4 @@ config QPNP_SMB5_NABU
           VBUS and VCONN regulators are registered for supporting OTG,
           and powered Type-C cables respectively.
 
-config FUEL_GAUGE_BQ27Z561
-	tristate "TI bq27z561 battery gauge driver"
-	help
-	  Say Y to enable support for TI bq27z561 fuel gauge driver
-
 endmenu
