@@ -142,7 +142,7 @@ int ksu_get_manager_signature_index(uid_t uid)
     
     // Check traditional manager first
     if (ksu_manager_uid != KSU_INVALID_UID && uid == ksu_manager_uid) {
-        return 1;
+        return DYNAMIC_SIGN_INDEX;
     }
     
     if (!ksu_is_dynamic_manager_enabled()) {

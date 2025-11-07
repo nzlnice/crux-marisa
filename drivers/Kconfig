@@ -227,6 +227,8 @@ source "drivers/esoc/Kconfig"
 
 source "drivers/mihw/Kconfig"
 
+source "drivers/sukisu/Kconfig"
+
 source "drivers/trusty/Kconfig"
 
 endmenu
