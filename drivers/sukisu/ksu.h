@@ -7,7 +7,29 @@
 #define KERNEL_SU_VERSION KSU_VERSION
 #define KERNEL_SU_OPTION 0xDEADBEEF
 
-extern bool ksu_uid_scanner_enabled;
+#define CMD_GRANT_ROOT 0
+#define CMD_BECOME_MANAGER 1
+#define CMD_GET_VERSION 2
+#define CMD_ALLOW_SU 3
+#define CMD_DENY_SU 4
+#define CMD_GET_ALLOW_LIST 5
+#define CMD_GET_DENY_LIST 6
+#define CMD_REPORT_EVENT 7
+#define CMD_SET_SEPOLICY 8
+#define CMD_CHECK_SAFEMODE 9
+#define CMD_GET_APP_PROFILE 10
+#define CMD_SET_APP_PROFILE 11
+#define CMD_UID_GRANTED_ROOT 12
+#define CMD_UID_SHOULD_UMOUNT 13
+#define CMD_IS_SU_ENABLED 14
+#define CMD_ENABLE_SU 15
+
+#define CMD_GET_FULL_VERSION 0xC0FFEE1A
+
+#define CMD_ENABLE_KPM 100
+#define CMD_HOOK_TYPE 101
+#define CMD_DYNAMIC_MANAGER 103
+#define CMD_GET_MANAGERS 104
 
 #define EVENT_POST_FS_DATA 1
 #define EVENT_BOOT_COMPLETED 2
@@ -20,7 +42,7 @@ extern bool ksu_uid_scanner_enabled;
 #define KSU_SELINUX_DOMAIN 64
 
 // SukiSU Ultra kernel su version full strings
-#ifndef KSU_VERSION_FULL 
+#ifndef KSU_VERSION_FULL
 #define KSU_VERSION_FULL "v3.x-00000000@unknown"
 #endif
 #define KSU_FULL_VERSION_STRING 255
@@ -28,10 +50,6 @@ extern bool ksu_uid_scanner_enabled;
 #define DYNAMIC_MANAGER_OP_SET 0
 #define DYNAMIC_MANAGER_OP_GET 1
 #define DYNAMIC_MANAGER_OP_CLEAR 2
-
-#define UID_SCANNER_OP_GET_STATUS 0
-#define UID_SCANNER_OP_TOGGLE 1
-#define UID_SCANNER_OP_CLEAR_ENV 2
 
 struct dynamic_manager_user_config {
 	unsigned int operation;

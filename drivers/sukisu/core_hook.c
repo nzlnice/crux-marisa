@@ -1,84 +1,69 @@
-#include <linux/slab.h>
-#include <linux/task_work.h>
-#include <linux/thread_info.h>
-#include <linux/seccomp.h>
 #include <linux/capability.h>
-#include <linux/cred.h>
 #include <linux/dcache.h>
-#include <linux/fs.h>
+#include <linux/err.h>
 #include <linux/init.h>
 #include <linux/init_task.h>
+#include <linux/kallsyms.h>
 #include <linux/kernel.h>
 #include <linux/kprobes.h>
+#ifdef CONFIG_KSU_LSM_SECURITY_HOOKS
+#include <linux/lsm_hooks.h>
+#endif
 #include <linux/mm.h>
-#include <linux/mount.h>
-#include <linux/namei.h>
 #include <linux/nsproxy.h>
 #include <linux/path.h>
 #include <linux/printk.h>
 #include <linux/sched.h>
+#include <linux/security.h>
 #include <linux/stddef.h>
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
 #include <linux/uidgid.h>
 #include <linux/version.h>
+#include <linux/mount.h>
+
+#include <linux/fs.h>
+#include <linux/namei.h>
 #ifndef KSU_HAS_PATH_UMOUNT
 #include <linux/syscalls.h> // sys_umount (<4.17) & ksys_umount (4.17+)
+#endif
+
+#ifdef MODULE
+#include <linux/list.h>
+#include <linux/irqflags.h>
+#include <linux/mm_types.h>
+#include <linux/rcupdate.h>
+#include <linux/vmalloc.h>
 #endif
 
 #include "allowlist.h"
 #include "arch.h"
 #include "core_hook.h"
-#include "feature.h"
 #include "klog.h" // IWYU pragma: keep
 #include "ksu.h"
 #include "ksud.h"
 #include "manager.h"
 #include "selinux/selinux.h"
 #include "throne_tracker.h"
-#include "throne_comm.h"
 #include "kernel_compat.h"
-#include "supercalls.h"
+#include "dynamic_manager.h"
 
-bool ksu_module_mounted = false;
-
-#ifndef DEVPTS_SUPER_MAGIC
-#define DEVPTS_SUPER_MAGIC	0x1cd1
+#ifdef CONFIG_KPM
+#include "kpm/kpm.h"
 #endif
 
-extern int __ksu_handle_devpts(struct inode *inode); // sucompat.c
+static bool ksu_module_mounted = false;
 
-#ifdef CONFIG_COMPAT
-bool ksu_is_compat __read_mostly = false;
-#endif
-
+// selinux/rules.c
 extern int handle_sepolicy(unsigned long arg3, void __user *arg4);
 
-static bool ksu_kernel_umount_enabled = true;
+// sucompat.c
+static bool ksu_su_compat_enabled = true;
+extern void ksu_sucompat_init();
+extern void ksu_sucompat_exit();
 
-static int kernel_umount_feature_get(u64 *value)
-{
-	*value = ksu_kernel_umount_enabled ? 1 : 0;
-	return 0;
-}
-
-static int kernel_umount_feature_set(u64 value)
-{
-	bool enable = value != 0;
-	ksu_kernel_umount_enabled = enable;
-	pr_info("kernel_umount: set to %d\n", enable);
-	return 0;
-}
-
-static const struct ksu_feature_handler kernel_umount_handler = {
-	.feature_id = KSU_FEATURE_KERNEL_UMOUNT,
-	.name = "kernel_umount",
-	.get_handler = kernel_umount_feature_get,
-	.set_handler = kernel_umount_feature_set,
-};
-
-static inline bool is_allow_su(void)
+static inline bool is_allow_su()
 {
 	if (is_manager()) {
 		// we are manager, allow!
@@ -94,13 +79,7 @@ static inline bool is_unsupported_uid(uid_t uid)
 	return appid > LAST_APPLICATION_UID;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
-static struct group_info root_groups = {
-	.usage = REFCOUNT_INIT(2),
-};
-#else
 static struct group_info root_groups = { .usage = ATOMIC_INIT(2) };
-#endif
 
 static void setup_groups(struct root_profile *profile, struct cred *cred)
 {
@@ -151,25 +130,23 @@ static void disable_seccomp(struct task_struct *tsk)
 	assert_spin_locked(&tsk->sighand->siglock);
 
 	// disable seccomp
-#if defined(CONFIG_GENERIC_ENTRY) &&                                           \
+#if defined(CONFIG_GENERIC_ENTRY) && \
 	LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-	clear_syscall_work(SECCOMP);
+	current_thread_info()->syscall_work &= ~SYSCALL_WORK_SECCOMP;
 #else
-	clear_thread_flag(TIF_SECCOMP);
+	current_thread_info()->flags &= ~(TIF_SECCOMP | _TIF_SECCOMP);
 #endif
 
 #ifdef CONFIG_SECCOMP
 	tsk->seccomp.mode = 0;
 	if (tsk->seccomp.filter) {
+		// TODO: Add kernel 6.11+ support
 		// 5.9+ have filter_count and use seccomp_filter_release
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
 		seccomp_filter_release(tsk);
 		atomic_set(&tsk->seccomp.filter_count, 0);
 #else
-		// for 6.11+ kernel support?
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)
 		put_seccomp_filter(tsk);
-#endif
 		tsk->seccomp.filter = NULL;
 #endif
 	}
@@ -178,32 +155,32 @@ static void disable_seccomp(struct task_struct *tsk)
 
 void escape_to_root(void)
 {
-	struct cred *cred;
+	struct cred *newcreds;
 
-	cred = prepare_creds();
-	if (!cred) {
-		pr_warn("prepare_creds failed!\n");
-		return;
-	}
-
-	if (cred->euid.val == 0) {
+	if (current_euid().val == 0) {
 		pr_warn("Already root, don't escape!\n");
-		abort_creds(cred);
+		return;
+	}
+	
+	newcreds = prepare_creds();
+	if (newcreds == NULL) {
+		pr_err("%s: failed to allocate new cred.\n", __func__);
 		return;
 	}
 
-	struct root_profile *profile = ksu_get_root_profile(cred->uid.val);
+	struct root_profile *profile =
+		ksu_get_root_profile(newcreds->uid.val);
 
-	cred->uid.val = profile->uid;
-	cred->suid.val = profile->uid;
-	cred->euid.val = profile->uid;
-	cred->fsuid.val = profile->uid;
+	newcreds->uid.val = profile->uid;
+	newcreds->suid.val = profile->uid;
+	newcreds->euid.val = profile->uid;
+	newcreds->fsuid.val = profile->uid;
 
-	cred->gid.val = profile->gid;
-	cred->fsgid.val = profile->gid;
-	cred->sgid.val = profile->gid;
-	cred->egid.val = profile->gid;
-	cred->securebits = 0;
+	newcreds->gid.val = profile->gid;
+	newcreds->fsgid.val = profile->gid;
+	newcreds->sgid.val = profile->gid;
+	newcreds->egid.val = profile->gid;
+	newcreds->securebits = 0;
 
 	BUILD_BUG_ON(sizeof(profile->capabilities.effective) !=
 		     sizeof(kernel_cap_t));
@@ -211,18 +188,17 @@ void escape_to_root(void)
 	// setup capabilities
 	// we need CAP_DAC_READ_SEARCH becuase `/data/adb/ksud` is not accessible for non root process
 	// we add it here but don't add it to cap_inhertiable, it would be dropped automaticly after exec!
-	u64 cap_for_ksud =
-		profile->capabilities.effective | CAP_DAC_READ_SEARCH;
-	memcpy(&cred->cap_effective, &cap_for_ksud,
-	       sizeof(cred->cap_effective));
-	memcpy(&cred->cap_permitted, &profile->capabilities.effective,
-	       sizeof(cred->cap_permitted));
-	memcpy(&cred->cap_bset, &profile->capabilities.effective,
-	       sizeof(cred->cap_bset));
+	u64 cap_for_ksud = profile->capabilities.effective |
+			   CAP_DAC_READ_SEARCH;
+	memcpy(&newcreds->cap_effective, &cap_for_ksud,
+	       sizeof(newcreds->cap_effective));
+	memcpy(&newcreds->cap_permitted, &profile->capabilities.effective,
+	       sizeof(newcreds->cap_permitted));
+	memcpy(&newcreds->cap_bset, &profile->capabilities.effective,
+	       sizeof(newcreds->cap_bset));
 
-	setup_groups(profile, cred);
-
-	commit_creds(cred);
+	setup_groups(profile, newcreds);
+	commit_creds(newcreds);
 
 	spin_lock_irq(&current->sighand->siglock);
 	disable_seccomp(current);
@@ -231,27 +207,435 @@ void escape_to_root(void)
 	setup_selinux(profile->selinux_domain);
 }
 
-void nuke_ext4_sysfs(void)
+int ksu_handle_rename(struct dentry *old_dentry, struct dentry *new_dentry)
 {
+	if (!current->mm) {
+		// skip kernel threads
+		return 0;
+	}
+
+	if (current_uid().val != 1000) {
+		// skip non system uid
+		return 0;
+	}
+
+	if (!old_dentry || !new_dentry) {
+		return 0;
+	}
+
+	// /data/system/packages.list.tmp -> /data/system/packages.list
+	if (strcmp(new_dentry->d_iname, "packages.list")) {
+		return 0;
+	}
+
+	char path[128];
+	char *buf = dentry_path_raw(new_dentry, path, sizeof(path));
+	if (IS_ERR(buf)) {
+		pr_err("dentry_path_raw failed.\n");
+		return 0;
+	}
+
+	if (!strstr(buf, "/system/packages.list")) {
+		return 0;
+	}
+	pr_info("renameat: %s -> %s, new path: %s\n", old_dentry->d_iname,
+		new_dentry->d_iname, buf);
+
+	track_throne();
+
+	return 0;
+}
+
 #ifdef CONFIG_EXT4_FS
+static void nuke_ext4_sysfs()
+{
 	struct path path;
 	int err = kern_path("/data/adb/modules", 0, &path);
 	if (err) {
-		pr_err("%s: failed to get path, err %d\n", __func__, err);
+		pr_err("nuke path err: %d\n", err);
 		return;
 	}
 
 	struct super_block *sb = path.dentry->d_inode->i_sb;
 	const char *name = sb->s_type->name;
 	if (strcmp(name, "ext4") != 0) {
-		pr_info("skipping s_type: %s\n", name);
+		pr_info("nuke but module aren't mounted\n");
 		path_put(&path);
 		return;
 	}
 
 	ext4_unregister_sysfs(sb);
 	path_put(&path);
+}
+#else
+static inline void nuke_ext4_sysfs()
+{
+}
 #endif
+
+int ksu_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
+		     unsigned long arg4, unsigned long arg5)
+{
+	// if success, we modify the arg5 as result!
+	u32 *result = (u32 *)arg5;
+	u32 reply_ok = KERNEL_SU_OPTION;
+
+	if (KERNEL_SU_OPTION != option) {
+		return 0;
+	}
+
+	// TODO: find it in throne tracker!
+	uid_t current_uid_val = current_uid().val;
+	uid_t manager_uid = ksu_get_manager_uid();
+	if (current_uid_val != manager_uid &&
+	    current_uid_val % 100000 == manager_uid) {
+		ksu_set_manager_uid(current_uid_val);
+	}
+
+	bool from_root = 0 == current_uid().val;
+	bool from_manager = is_manager();
+
+	if (!from_root && !from_manager) {
+		// only root or manager can access this interface
+		return 0;
+	}
+
+#ifdef CONFIG_KSU_DEBUG
+	pr_info("option: 0x%x, cmd: %ld\n", option, arg2);
+#endif
+
+	if (arg2 == CMD_BECOME_MANAGER) {
+		if (from_manager) {
+			if (copy_to_user(result, &reply_ok, sizeof(reply_ok))) {
+				pr_err("become_manager: prctl reply error\n");
+			}
+			return 0;
+		}
+		return 0;
+	}
+
+	if (arg2 == CMD_GRANT_ROOT) {
+		if (is_allow_su()) {
+			pr_info("allow root for: %d\n", current_uid().val);
+			escape_to_root();
+			if (copy_to_user(result, &reply_ok, sizeof(reply_ok))) {
+				pr_err("grant_root: prctl reply error\n");
+			}
+		}
+		return 0;
+	}
+
+	// Both root manager and root processes should be allowed to get version
+	if (arg2 == CMD_GET_VERSION) {
+		u32 version = KERNEL_SU_VERSION;
+		if (copy_to_user(arg3, &version, sizeof(version))) {
+			pr_err("prctl reply error, cmd: %lu\n", arg2);
+		}
+		u32 version_flags = 2;
+#ifdef MODULE
+		version_flags |= 0x1;
+#endif
+		if (arg4 &&
+		    copy_to_user(arg4, &version_flags, sizeof(version_flags))) {
+			pr_err("prctl reply error, cmd: %lu\n", arg2);
+		}
+		return 0;
+	}
+
+	// Allow root manager to get full version strings
+	if (arg2 == CMD_GET_FULL_VERSION) {
+		char ksu_version_full[KSU_FULL_VERSION_STRING] = { 0 };
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 13, 0)
+		strscpy(ksu_version_full, KSU_VERSION_FULL,
+			KSU_FULL_VERSION_STRING);
+#else
+		strlcpy(ksu_version_full, KSU_VERSION_FULL,
+			KSU_FULL_VERSION_STRING);
+#endif
+		if (copy_to_user((void __user *)arg3, ksu_version_full,
+				 KSU_FULL_VERSION_STRING)) {
+			pr_err("prctl reply error, cmd: %lu\n", arg2);
+			return -EFAULT;
+		}
+		return 0;
+	}
+
+	// Allow the root manager to configure dynamic manageratures
+	if (arg2 == CMD_DYNAMIC_MANAGER) {
+    	if (!from_root && !from_manager) {
+        	return 0;
+    	}
+    
+    	struct dynamic_manager_user_config config;
+    
+    	if (copy_from_user(&config, (void __user *)arg3,
+				   sizeof(config))) {
+        	pr_err("copy dynamic manager config failed\n");
+        	return 0;
+    	}
+    
+    	int ret = ksu_handle_dynamic_manager(&config);
+    	
+    	if (ret == 0 && config.operation == DYNAMIC_MANAGER_OP_GET) {
+        	if (copy_to_user((void __user *)arg3, &config,
+					 sizeof(config))) {
+            	pr_err("copy dynamic manager config back failed\n");
+            	return 0;
+        	}
+    	}
+    	
+    	if (ret == 0) {
+        	if (copy_to_user(result, &reply_ok, sizeof(reply_ok))) {
+            	pr_err("dynamic_manager: prctl reply error\n");
+        	}
+    	}
+    	return 0;
+	}
+
+	// Allow root manager to get active managers
+	if (arg2 == CMD_GET_MANAGERS) {
+		if (!from_root && !from_manager) {
+			return 0;
+		}
+
+		struct manager_list_info manager_info;
+		int ret = ksu_get_active_managers(&manager_info);
+
+		if (ret == 0) {
+			if (copy_to_user((void __user *)arg3, &manager_info,
+					 sizeof(manager_info))) {
+				pr_err("copy manager list failed\n");
+				return 0;
+			}
+			if (copy_to_user(result, &reply_ok, sizeof(reply_ok))) {
+				pr_err("get_managers: prctl reply error\n");
+			}
+		}
+		return 0;
+	}
+
+	if (arg2 == CMD_REPORT_EVENT) {
+		if (!from_root) {
+			return 0;
+		}
+		switch (arg3) {
+		case EVENT_POST_FS_DATA: {
+			static bool post_fs_data_lock = false;
+			if (!post_fs_data_lock) {
+				post_fs_data_lock = true;
+				pr_info("post-fs-data triggered\n");
+				on_post_fs_data();
+				// Initializing Dynamic Signatures
+        		ksu_dynamic_manager_init();
+        		pr_info("Dynamic manager config loaded during post-fs-data\n");
+			}
+			break;
+		}
+		case EVENT_BOOT_COMPLETED: {
+			static bool boot_complete_lock = false;
+			if (!boot_complete_lock) {
+				boot_complete_lock = true;
+				pr_info("boot_complete triggered\n");
+			}
+			break;
+		}
+		case EVENT_MODULE_MOUNTED: {
+			ksu_module_mounted = true;
+			pr_info("module mounted!\n");
+			nuke_ext4_sysfs();
+			break;
+		}
+		default:
+			break;
+		}
+		return 0;
+	}
+
+	if (arg2 == CMD_SET_SEPOLICY) {
+		if (!from_root) {
+			return 0;
+		}
+		if (!handle_sepolicy(arg3, arg4)) {
+			if (copy_to_user(result, &reply_ok, sizeof(reply_ok))) {
+				pr_err("sepolicy: prctl reply error\n");
+			}
+		}
+
+		return 0;
+	}
+
+	if (arg2 == CMD_CHECK_SAFEMODE) {
+		if (ksu_is_safe_mode()) {
+			pr_warn("safemode enabled!\n");
+			if (copy_to_user(result, &reply_ok, sizeof(reply_ok))) {
+				pr_err("safemode: prctl reply error\n");
+			}
+		}
+		return 0;
+	}
+
+	if (arg2 == CMD_GET_ALLOW_LIST || arg2 == CMD_GET_DENY_LIST) {
+		u32 array[128];
+		u32 array_length;
+		bool success = ksu_get_allow_list(array, &array_length,
+						  arg2 == CMD_GET_ALLOW_LIST);
+		if (success) {
+			if (!copy_to_user(arg4, &array_length,
+					  sizeof(array_length)) &&
+			    !copy_to_user(arg3, array,
+					  sizeof(u32) * array_length)) {
+				if (copy_to_user(result, &reply_ok,
+						 sizeof(reply_ok))) {
+					pr_err("prctl reply error, cmd: %lu\n",
+					       arg2);
+				}
+			} else {
+				pr_err("prctl copy allowlist error\n");
+			}
+		}
+		return 0;
+	}
+
+	if (arg2 == CMD_UID_GRANTED_ROOT || arg2 == CMD_UID_SHOULD_UMOUNT) {
+		uid_t target_uid = (uid_t)arg3;
+		bool allow = false;
+		if (arg2 == CMD_UID_GRANTED_ROOT) {
+			allow = ksu_is_allow_uid(target_uid);
+		} else if (arg2 == CMD_UID_SHOULD_UMOUNT) {
+			allow = ksu_uid_should_umount(target_uid);
+		} else {
+			pr_err("unknown cmd: %lu\n", arg2);
+		}
+		if (!copy_to_user(arg4, &allow, sizeof(allow))) {
+			if (copy_to_user(result, &reply_ok, sizeof(reply_ok))) {
+				pr_err("prctl reply error, cmd: %lu\n", arg2);
+			}
+		} else {
+			pr_err("prctl copy err, cmd: %lu\n", arg2);
+		}
+		return 0;
+	}
+
+	// Checking hook usage
+	if (arg2 == CMD_HOOK_TYPE) {
+		const char *hook_type;
+
+#if defined(CONFIG_KSU_KPROBES_HOOK)
+		hook_type = "Kprobes";
+#elif defined(CONFIG_KSU_TRACEPOINT_HOOK)
+		hook_type = "Tracepoint";
+#elif defined(CONFIG_KSU_MANUAL_HOOK)
+		hook_type = "Manual";
+#else
+		hook_type = "Unknown";
+#endif
+
+		size_t len = strlen(hook_type) + 1;
+		if (copy_to_user((void __user *)arg3, hook_type, len)) {
+			pr_err("hook_type: copy_to_user failed\n");
+			return 0;
+		}
+
+		if (copy_to_user(result, &reply_ok, sizeof(reply_ok))) {
+			pr_err("hook_type: prctl reply error\n");
+		}
+		return 0;
+	}
+
+#ifdef CONFIG_KPM
+	// ADD: 添加KPM模块控制
+	if (sukisu_is_kpm_control_code(arg2)) {
+		int res;
+
+		pr_info("KPM: calling before arg2=%d\n", (int)arg2);
+
+		res = sukisu_handle_kpm(arg2, arg3, arg4, arg5);
+
+		return 0;
+	}
+#endif
+	if (arg2 == CMD_ENABLE_KPM) {
+		bool KPM_Enabled = IS_ENABLED(CONFIG_KPM);
+		if (copy_to_user((void __user *)arg3, &KPM_Enabled,
+				 sizeof(KPM_Enabled)))
+			pr_info("KPM: copy_to_user() failed\n");
+		return 0;
+	}
+
+	// all other cmds are for 'root manager'
+	if (!from_manager) {
+		return 0;
+	}
+
+	// we are already manager
+	if (arg2 == CMD_GET_APP_PROFILE) {
+		struct app_profile profile;
+		if (copy_from_user(&profile, arg3, sizeof(profile))) {
+			pr_err("copy profile failed\n");
+			return 0;
+		}
+
+		bool success = ksu_get_app_profile(&profile);
+		if (success) {
+			if (copy_to_user(arg3, &profile, sizeof(profile))) {
+				pr_err("copy profile failed\n");
+				return 0;
+			}
+			if (copy_to_user(result, &reply_ok, sizeof(reply_ok))) {
+				pr_err("prctl reply error, cmd: %lu\n", arg2);
+			}
+		}
+		return 0;
+	}
+
+	if (arg2 == CMD_SET_APP_PROFILE) {
+		struct app_profile profile;
+		if (copy_from_user(&profile, arg3, sizeof(profile))) {
+			pr_err("copy profile failed\n");
+			return 0;
+		}
+
+		// todo: validate the params
+		if (ksu_set_app_profile(&profile, true)) {
+			if (copy_to_user(result, &reply_ok, sizeof(reply_ok))) {
+				pr_err("prctl reply error, cmd: %lu\n", arg2);
+			}
+		}
+		return 0;
+	}
+
+	if (arg2 == CMD_IS_SU_ENABLED) {
+		if (copy_to_user(arg3, &ksu_su_compat_enabled,
+				 sizeof(ksu_su_compat_enabled))) {
+			pr_err("copy su compat failed\n");
+			return 0;
+		}
+		if (copy_to_user(result, &reply_ok, sizeof(reply_ok))) {
+			pr_err("prctl reply error, cmd: %lu\n", arg2);
+		}
+		return 0;
+	}
+	if (arg2 == CMD_ENABLE_SU) {
+		bool enabled = (arg3 != 0);
+		if (enabled == ksu_su_compat_enabled) {
+			pr_info("cmd enable su but no need to change.\n");
+			if (copy_to_user(result, &reply_ok, sizeof(reply_ok))) {
+				pr_err("prctl reply error, cmd: %lu\n", arg2);
+			}
+			return 0;
+		}
+		if (enabled) {
+			ksu_sucompat_init();
+		} else {
+			ksu_sucompat_exit();
+		}
+		ksu_su_compat_enabled = enabled;
+		if (copy_to_user(result, &reply_ok, sizeof(reply_ok))) {
+			pr_err("prctl reply error, cmd: %lu\n", arg2);
+		}
+		return 0;
+	}
+	return 0;
 }
 
 static bool is_appuid(kuid_t uid)
@@ -283,9 +667,13 @@ static bool should_umount(struct path *path)
 	return false;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0) ||                           \
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0) || \
 	defined(KSU_HAS_PATH_UMOUNT)
-#define ksu_umount_mnt(__unused, path, flags) (path_umount(path, flags))
+static int ksu_path_umount(struct path *path, int flags)
+{
+	return path_umount(path, flags);
+}
+#define ksu_umount_mnt(__unused, path, flags) (ksu_path_umount(path, flags))
 #else
 static int ksu_sys_umount(const char *mnt, int flags)
 {
@@ -301,15 +689,14 @@ static int ksu_sys_umount(const char *mnt, int flags)
 	ret = sys_umount(usermnt, flags); // cuz asmlinkage long sys##name
 #endif
 	set_fs(old_fs);
+	pr_info("%s was called, ret: %d\n", __func__, ret);
 	return ret;
 }
 
-#define ksu_umount_mnt(mnt, __unused, flags)                                   \
-	({                                                                     \
-		int ret;                                                       \
-		path_put(__unused);                                            \
-		ret = ksu_sys_umount(mnt, flags);                              \
-		ret;                                                           \
+#define ksu_umount_mnt(mnt, __unused, flags) \
+	({                                   \
+		path_put(__unused);          \
+		ksu_sys_umount(mnt, flags);  \
 	})
 
 #endif
@@ -343,56 +730,19 @@ static void try_umount(const char *mnt, bool check_mnt, int flags)
 	}
 }
 
-static void ksu_do_umount_lists(void)
-{
-	// fixme: use `collect_mounts` and `iterate_mount` to iterate all mountpoint and
-	// filter the mountpoint whose target is `/data/adb`
-	try_umount("/odm", true, 0);
-	try_umount("/system", true, 0);
-	try_umount("/vendor", true, 0);
-	try_umount("/product", true, 0);
-	try_umount("/system_ext", true, 0);
-	try_umount("/data/adb/modules", false, MNT_DETACH);
-
-	try_umount("/debug_ramdisk", false, MNT_DETACH);
-	try_umount("/sbin", false, MNT_DETACH);
-}
-
-#if defined(MODULE) || defined(CONFIG_KSU_KPROBES_HOOK)
-struct umount_tw {
-	struct callback_head cb;
-	const struct cred *old_cred;
-};
-
-static void umount_tw_func(struct callback_head *cb)
-{
-	struct umount_tw *tw = container_of(cb, struct umount_tw, cb);
-	const struct cred *saved = NULL;
-	if (tw->old_cred) {
-		saved = override_creds(tw->old_cred);
-	}
-
-	ksu_do_umount_lists();
-
-	if (saved)
-		revert_creds(saved);
-
-	if (tw->old_cred)
-		put_cred(tw->old_cred);
-
-	kfree(tw);
-}
-#endif
-
 int ksu_handle_setuid(struct cred *new, const struct cred *old)
 {
+	// this hook is used for umounting overlayfs for some uid, if there isn't any module mounted, just ignore it!
+	if (!ksu_module_mounted) {
+		return 0;
+	}
+
 	if (!new || !old) {
 		return 0;
 	}
 
 	kuid_t new_uid = new->uid;
 	kuid_t old_uid = old->uid;
-	// pr_info("handle_setuid from %d to %d\n", old_uid.val, new_uid.val);
 
 	if (0 != old_uid.val) {
 		// old process is not root, ignore it.
@@ -404,52 +754,8 @@ int ksu_handle_setuid(struct cred *new, const struct cred *old)
 		return 0;
 	}
 
-	// if on private space, see if its possibly the manager
-	if (new_uid.val > 100000 &&
-	    new_uid.val % 100000 == ksu_get_manager_uid()) {
-		ksu_set_manager_uid(new_uid.val);
-	}
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
-	if (ksu_get_manager_uid() == new_uid.val) {
-		pr_info("install fd for ksu manager(uid=%d)\n", new_uid.val);
-		ksu_install_fd();
-		spin_lock_irq(&current->sighand->siglock);
-		ksu_seccomp_allow_cache(current->seccomp.filter, __NR_reboot);
-		spin_unlock_irq(&current->sighand->siglock);
-		return 0;
-	}
-
 	if (ksu_is_allow_uid(new_uid.val)) {
-		if (current->seccomp.mode == SECCOMP_MODE_FILTER &&
-		    current->seccomp.filter) {
-			spin_lock_irq(&current->sighand->siglock);
-			ksu_seccomp_allow_cache(current->seccomp.filter,
-						__NR_reboot);
-			spin_unlock_irq(&current->sighand->siglock);
-		}
-	}
-#else
-	if (ksu_is_allow_uid(new_uid.val)) {
-		spin_lock_irq(&current->sighand->siglock);
-		disable_seccomp(current);
-		spin_unlock_irq(&current->sighand->siglock);
-
-		if (ksu_get_manager_uid() == new_uid.val) {
-			pr_info("install fd for ksu manager(uid=%d)\n", new_uid.val);
-			ksu_install_fd();
-		}
-
-		return 0;
-	}
-#endif
-
-	// this hook is used for umounting overlayfs for some uid, if there isn't any module mounted, just ignore it!
-	if (!ksu_module_mounted) {
-		return 0;
-	}
-
-	if (!ksu_kernel_umount_enabled) {
+		// pr_info("handle setuid ignore allowed application: %d\n", new_uid.val);
 		return 0;
 	}
 
@@ -464,7 +770,8 @@ int ksu_handle_setuid(struct cred *new, const struct cred *old)
 	// check old process's selinux context, if it is not zygote, ignore it!
 	// because some su apps may setuid to untrusted_app but they are in global mount namespace
 	// when we umount for such process, that is a disaster!
-	if (!is_zygote(old->security)) {
+	bool is_zygote_child = is_zygote(old->security);
+	if (!is_zygote_child) {
 		pr_info("handle umount ignore non zygote child: %d\n",
 			current->pid);
 		return 0;
@@ -475,109 +782,28 @@ int ksu_handle_setuid(struct cred *new, const struct cred *old)
 		current->pid);
 #endif
 
-#if defined(MODULE) || defined(CONFIG_KSU_KPROBES_HOOK)
-	struct umount_tw *tw;
-	tw = kmalloc(sizeof(*tw), GFP_ATOMIC);
-	if (!tw)
-		return 0;
+	// fixme: use `collect_mounts` and `iterate_mount` to iterate all mountpoint and
+	// filter the mountpoint whose target is `/data/adb`
+	try_umount("/system", true, 0);
+	try_umount("/vendor", true, 0);
+	try_umount("/product", true, 0);
+	try_umount("/system_ext", true, 0);
 
-	tw->old_cred = get_current_cred();
-	tw->cb.func = umount_tw_func;
+	// try umount modules path
+	try_umount("/data/adb/modules", false, MNT_DETACH);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 8)
-	int err = task_work_add(current, &tw->cb, TWA_RESUME);
-#else
-	int err = task_work_add(current, &tw->cb, true);
-#endif
-
-	if (err) {
-		if (tw->old_cred) {
-			put_cred(tw->old_cred);
-		}
-		kfree(tw);
-		pr_warn("unmount add task_work failed\n");
-	}
-#else
-	ksu_do_umount_lists();
-#endif
+	// try umount ksu temp path
+	try_umount("/debug_ramdisk", false, MNT_DETACH);
+	try_umount("/sbin", false, MNT_DETACH);
 
 	return 0;
-}
-
-int ksu_inode_permission(struct inode *inode, int mask)
-{
-	if (inode && inode->i_sb 
-		&& unlikely(inode->i_sb->s_magic == DEVPTS_SUPER_MAGIC)) {
-		//pr_info("%s: handling devpts for: %s \n", __func__, current->comm);
-		__ksu_handle_devpts(inode);
-	}
-	return 0;
-}
-
-int ksu_bprm_check(struct linux_binprm *bprm)
-{
-	char *filename = (char *)bprm->filename;
-	
-	if (likely(!ksu_execveat_hook))
-		return 0;
-
-#ifdef CONFIG_COMPAT
-	static bool compat_check_done __read_mostly = false;
-	if ( unlikely(!compat_check_done) && unlikely(!strcmp(filename, "/data/adb/ksud"))
-		&& !memcmp(bprm->buf, "\x7f\x45\x4c\x46", 4) ) {
-		if (bprm->buf[4] == 0x01 )
-			ksu_is_compat = true;
-
-		pr_info("%s: %s ELF magic found! ksu_is_compat: %d \n", __func__, filename, ksu_is_compat);
-		compat_check_done = true;
-	}
-#endif
-
-	ksu_handle_pre_ksud(filename);
-
-	return 0;
-
-}
-
-int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd,
-			  void __user **arg)
-{
-	if (magic1 != KSU_INSTALL_MAGIC1)
-		return 0;
-
-#ifdef CONFIG_KSU_DEBUG
-	pr_info("sys_reboot: intercepted call! magic: 0x%x id: %d\n", magic1,
-		magic2);
-#endif
-
-	// Check if this is a request to install KSU fd
-	if (magic2 == KSU_INSTALL_MAGIC2) {
-		int fd = ksu_install_fd();
-		// downstream: dereference all arg usage!
-		if (copy_to_user((void __user *)*arg, &fd, sizeof(fd))) {
-			pr_err("install ksu fd reply err\n");
-		}
-		return 0;
-	}
-
-	// extensions
-
-	return 0;
-}
-
-// -- For old kernel compat?
-#if !defined(MODULE) && !defined(CONFIG_KSU_KPROBES_HOOK)
-static int ksu_task_fix_setuid(struct cred *new,
-					      const struct cred *old, int flags)
-{
-	return ksu_handle_setuid(new, old);
 }
 
 // kernel 4.4 and 4.9
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0) ||                           \
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0) || \
 	defined(CONFIG_IS_HW_HISI) || defined(CONFIG_KSU_ALLOWLIST_WORKAROUND)
-static int ksu_key_permission(key_ref_t key_ref, const struct cred *cred,
-			      unsigned perm)
+int ksu_key_permission(key_ref_t key_ref, const struct cred *cred,
+		       unsigned perm)
 {
 	if (init_session_keyring != NULL) {
 		return 0;
@@ -592,143 +818,262 @@ static int ksu_key_permission(key_ref_t key_ref, const struct cred *cred,
 }
 #endif
 
-#include <linux/lsm_hooks.h>
+#ifdef CONFIG_KSU_LSM_SECURITY_HOOKS
+static int ksu_task_prctl(int option, unsigned long arg2, unsigned long arg3,
+			  unsigned long arg4, unsigned long arg5)
+{
+	ksu_handle_prctl(option, arg2, arg3, arg4, arg5);
+	return -ENOSYS;
+}
+
+static int ksu_inode_rename(struct inode *old_inode, struct dentry *old_dentry,
+			    struct inode *new_inode, struct dentry *new_dentry)
+{
+	return ksu_handle_rename(old_dentry, new_dentry);
+}
+
+static int ksu_task_fix_setuid(struct cred *new, const struct cred *old,
+			       int flags)
+{
+	return ksu_handle_setuid(new, old);
+}
+
+#ifndef MODULE
+extern int __ksu_handle_devpts(struct inode *inode);
+static int ksu_inode_permission(struct inode *inode, int mask)
+{
+	if (unlikely(inode->i_sb &&
+		     inode->i_sb->s_magic == DEVPTS_SUPER_MAGIC)) {
+#ifdef CONFIG_KSU_DEBUG
+		pr_info("%s: devpts inode accessed with mask: %x\n", __func__,
+			mask);
+#endif
+		__ksu_handle_devpts(inode);
+	}
+	return 0;
+}
+
 static struct security_hook_list ksu_hooks[] = {
+	LSM_HOOK_INIT(task_prctl, ksu_task_prctl),
+	LSM_HOOK_INIT(inode_rename, ksu_inode_rename),
 	LSM_HOOK_INIT(task_fix_setuid, ksu_task_fix_setuid),
 	LSM_HOOK_INIT(inode_permission, ksu_inode_permission),
-	#ifndef CONFIG_KSU_KPROBES_HOOK
-	LSM_HOOK_INIT(bprm_check_security, ksu_bprm_check),
-#endif
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0) ||                           \
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0) || \
 	defined(CONFIG_IS_HW_HISI) || defined(CONFIG_KSU_ALLOWLIST_WORKAROUND)
 	LSM_HOOK_INIT(key_permission, ksu_key_permission)
 #endif
 };
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
-static const struct lsm_id ksu_lsmid = {
-	.name = "ksu",
-	.id = 912,
-};
-#endif
-
-static void ksu_lsm_hook_init(void)
+void __init ksu_lsm_hook_init(void)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
-	security_add_hooks(ksu_hooks, ARRAY_SIZE(ksu_hooks), &ksu_lsmid);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
 	security_add_hooks(ksu_hooks, ARRAY_SIZE(ksu_hooks), "ksu");
 #else
 	// https://elixir.bootlin.com/linux/v4.10.17/source/include/linux/lsm_hooks.h#L1892
 	security_add_hooks(ksu_hooks, ARRAY_SIZE(ksu_hooks));
 #endif
-	pr_info("LSM hooks initialized.\n");
 }
+
 #else
-static void ksu_lsm_hook_init(void)
+// keep renameat_handler for LKM support
+static int renameat_handler_pre(struct kprobe *p, struct pt_regs *regs)
 {
-}
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
+	// https://elixir.bootlin.com/linux/v5.12-rc1/source/include/linux/fs.h
+	struct renamedata *rd = PT_REGS_PARM1(regs);
+	struct dentry *old_entry = rd->old_dentry;
+	struct dentry *new_entry = rd->new_dentry;
+#else
+	struct dentry *old_entry = (struct dentry *)PT_REGS_PARM2(regs);
+	struct dentry *new_entry = (struct dentry *)PT_REGS_CCALL_PARM4(regs);
 #endif
 
-// -- For KPROBE and LKM handler
-#if defined(MODULE) || defined(CONFIG_KSU_KPROBES_HOOK)
-static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
-{
-	struct pt_regs *real_regs = PT_REAL_REGS(regs);
-	int magic1 = (int)PT_REGS_PARM1(real_regs);
-	int magic2 = (int)PT_REGS_PARM2(real_regs);
-	int cmd = (int)PT_REGS_PARM3(real_regs);
-	void __user **arg = (void __user **)&PT_REGS_SYSCALL_PARM4(real_regs);
-
-	return ksu_handle_sys_reboot(magic1, magic2, cmd, arg);
+	return ksu_handle_rename(old_entry, new_entry);
 }
 
-static struct kprobe reboot_kp = {
-	.symbol_name = REBOOT_SYMBOL,
-	.pre_handler = reboot_handler_pre,
+static struct kprobe renameat_kp = {
+	.symbol_name = "vfs_rename",
+	.pre_handler = renameat_handler_pre,
 };
 
-// 2. cap_task_fix_setuid hook for handling setuid
-static int cap_task_fix_setuid_handler_pre(struct kprobe *p,
-					   struct pt_regs *regs)
+static int override_security_head(void *head, const void *new_head, size_t len)
 {
-	struct cred *new = (struct cred *)PT_REGS_PARM1(regs);
-	const struct cred *old = (const struct cred *)PT_REGS_PARM2(regs);
+	unsigned long base = (unsigned long)head & PAGE_MASK;
+	unsigned long offset = offset_in_page(head);
 
-	ksu_handle_setuid(new, old);
+	// this is impossible for our case because the page alignment
+	// but be careful for other cases!
+	BUG_ON(offset + len > PAGE_SIZE);
+	struct page *page = phys_to_page(__pa(base));
+	if (!page) {
+		return -EFAULT;
+	}
 
+	void *addr = vmap(&page, 1, VM_MAP, PAGE_KERNEL);
+	if (!addr) {
+		return -ENOMEM;
+	}
+	local_irq_disable();
+	memcpy(addr + offset, new_head, len);
+	local_irq_enable();
+	vunmap(addr);
 	return 0;
 }
 
-static struct kprobe cap_task_fix_setuid_kp = {
-	.symbol_name = "cap_task_fix_setuid",
-	.pre_handler = cap_task_fix_setuid_handler_pre,
-};
-
-static int ksu_kprobe_init(void)
+static void free_security_hook_list(struct hlist_head *head)
 {
-	int rc = 0;
+	struct hlist_node *temp;
+	struct security_hook_list *entry;
 
-	// Register reboot kprobe
-	rc = register_kprobe(&reboot_kp);
-	if (rc) {
-		pr_err("reboot kprobe failed: %d\n", rc);
-		return rc;
-	}
-	pr_info("reboot kprobe registered successfully\n");
+	if (!head)
+		return;
 
-	// Register cap_task_fix_setuid kprobe
-	rc = register_kprobe(&cap_task_fix_setuid_kp);
-	if (rc) {
-		pr_err("cap_task_fix_setuid kprobe failed: %d\n", rc);
-		unregister_kprobe(&reboot_kp);
-		return rc;
-	}
-	pr_info("cap_task_fix_setuid kprobe registered successfully\n");
-
-	return 0;
-}
-
-static void ksu_kprobe_exit(void)
-{
-	unregister_kprobe(&cap_task_fix_setuid_kp);
-	unregister_kprobe(&reboot_kp);
-}
-
-void __init ksu_core_init(void)
-{
-	int rc = ksu_kprobe_init();
-	if (rc) {
-		pr_err("ksu_kprobe_init failed: %d\n", rc);
+	hlist_for_each_entry_safe(entry, temp, head, list) {
+		hlist_del(&entry->list);
+		kfree(entry);
 	}
 
-	if (ksu_register_feature_handler(&kernel_umount_handler)) {
-		pr_err("Failed to register umount feature handler\n");
-	}
+	kfree(head);
 }
 
-void ksu_core_exit(void)
+struct hlist_head *copy_security_hlist(struct hlist_head *orig)
 {
-	pr_info("ksu_core_exit\n");
-	ksu_kprobe_exit();
-	ksu_unregister_feature_handler(KSU_FEATURE_KERNEL_UMOUNT);
+	struct hlist_head *new_head = kmalloc(sizeof(*new_head), GFP_KERNEL);
+	if (!new_head)
+		return NULL;
+
+	INIT_HLIST_HEAD(new_head);
+
+	struct security_hook_list *entry;
+	struct security_hook_list *new_entry;
+
+	hlist_for_each_entry(entry, orig, list) {
+		new_entry = kmalloc(sizeof(*new_entry), GFP_KERNEL);
+		if (!new_entry) {
+			free_security_hook_list(new_head);
+			return NULL;
+		}
+
+		*new_entry = *entry;
+
+		hlist_add_tail_rcu(&new_entry->list, new_head);
+	}
+
+	return new_head;
 }
-#else
+
+#define LSM_SEARCH_MAX 180 // This should be enough to iterate
+static void *find_head_addr(void *security_ptr, int *index)
+{
+	if (!security_ptr) {
+		return NULL;
+	}
+	struct hlist_head *head_start =
+		(struct hlist_head *)&security_hook_heads;
+
+	for (int i = 0; i < LSM_SEARCH_MAX; i++) {
+		struct hlist_head *head = head_start + i;
+		struct security_hook_list *pos;
+		hlist_for_each_entry(pos, head, list) {
+			if (pos->hook.capget == security_ptr) {
+				if (index) {
+					*index = i;
+				}
+				return head;
+			}
+		}
+	}
+
+	return NULL;
+}
+
+#define GET_SYMBOL_ADDR(sym)                                       \
+	({                                                         \
+		void *addr = kallsyms_lookup_name(#sym ".cfi_jt"); \
+		if (!addr) {                                       \
+			addr = kallsyms_lookup_name(#sym);         \
+		}                                                  \
+		addr;                                              \
+	})
+
+#define KSU_LSM_HOOK_HACK_INIT(head_ptr, name, func)                          \
+	do {                                                                  \
+		static struct security_hook_list hook = {                     \
+			.hook = { .name = func }                              \
+		};                                                            \
+		hook.head = head_ptr;                                         \
+		hook.lsm = "ksu";                                             \
+		struct hlist_head *new_head = copy_security_hlist(hook.head); \
+		if (!new_head) {                                              \
+			pr_err("Failed to copy security list: %s\n", #name);  \
+			break;                                                \
+		}                                                             \
+		hlist_add_tail_rcu(&hook.list, new_head);                     \
+		if (override_security_head(hook.head, new_head,               \
+					   sizeof(*new_head))) {              \
+			free_security_hook_list(new_head);                    \
+			pr_err("Failed to hack lsm for: %s\n", #name);        \
+		}                                                             \
+	} while (0)
+
+void __init ksu_lsm_hook_init(void)
+{
+	void *cap_prctl = GET_SYMBOL_ADDR(cap_task_prctl);
+	void *prctl_head = find_head_addr(cap_prctl, NULL);
+	if (prctl_head) {
+		if (prctl_head != &security_hook_heads.task_prctl) {
+			pr_warn("prctl's address has shifted!\n");
+		}
+		KSU_LSM_HOOK_HACK_INIT(prctl_head, task_prctl, ksu_task_prctl);
+	} else {
+		pr_warn("Failed to find task_prctl!\n");
+	}
+
+	int inode_killpriv_index = -1;
+	void *cap_killpriv = GET_SYMBOL_ADDR(cap_inode_killpriv);
+	find_head_addr(cap_killpriv, &inode_killpriv_index);
+	if (inode_killpriv_index < 0) {
+		pr_warn("Failed to find inode_rename, use kprobe instead!\n");
+		register_kprobe(&renameat_kp);
+	} else {
+		int inode_rename_index = inode_killpriv_index +
+					 &security_hook_heads.inode_rename -
+					 &security_hook_heads.inode_killpriv;
+		struct hlist_head *head_start =
+			(struct hlist_head *)&security_hook_heads;
+		void *inode_rename_head = head_start + inode_rename_index;
+		if (inode_rename_head != &security_hook_heads.inode_rename) {
+			pr_warn("inode_rename's address has shifted!\n");
+		}
+		KSU_LSM_HOOK_HACK_INIT(inode_rename_head, inode_rename,
+				       ksu_inode_rename);
+	}
+	void *cap_setuid = GET_SYMBOL_ADDR(cap_task_fix_setuid);
+	void *setuid_head = find_head_addr(cap_setuid, NULL);
+	if (setuid_head) {
+		if (setuid_head != &security_hook_heads.task_fix_setuid) {
+			pr_warn("setuid's address has shifted!\n");
+		}
+		KSU_LSM_HOOK_HACK_INIT(setuid_head, task_fix_setuid,
+				       ksu_task_fix_setuid);
+	} else {
+		pr_warn("Failed to find task_fix_setuid!\n");
+	}
+	smp_mb();
+}
+#endif
 
 void __init ksu_core_init(void)
 {
 	ksu_lsm_hook_init();
-
-	if (ksu_register_feature_handler(&kernel_umount_handler)) {
-		pr_err("Failed to register umount feature handler\n");
-	}
 }
+#else
+void __init ksu_core_init(void)
+{
+	pr_info("ksu_core_init: LSM hooks not in use.\n");
+}
+#endif //CONFIG_KSU_LSM_SECURITY_HOOKS
 
 void ksu_core_exit(void)
 {
-	ksu_unregister_feature_handler(KSU_FEATURE_KERNEL_UMOUNT);
-	ksu_uid_exit();
-	ksu_throne_comm_exit();
 }
-
-#endif

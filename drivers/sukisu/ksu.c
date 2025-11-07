@@ -2,18 +2,38 @@
 #include <linux/fs.h>
 #include <linux/kobject.h>
 #include <linux/module.h>
-#include <generated/utsrelease.h>
-#include <generated/compile.h>
-#include <linux/version.h> /* LINUX_VERSION_CODE, KERNEL_VERSION macros */
 #include <linux/workqueue.h>
 
 #include "allowlist.h"
 #include "arch.h"
 #include "core_hook.h"
-#include "feature.h"
 #include "klog.h" // IWYU pragma: keep
 #include "ksu.h"
 #include "throne_tracker.h"
+
+#ifdef CONFIG_KSU_CMDLINE
+#include <linux/init.h>
+
+// use get_ksu_state()!
+unsigned int enable_kernelsu = 1; // enabled by default
+static int __init read_kernelsu_state(char *s)
+{
+	if (s)
+		enable_kernelsu = simple_strtoul(s, NULL, 0);
+	return 1;
+}
+__setup("kernelsu.enabled=", read_kernelsu_state);
+
+bool get_ksu_state(void)
+{
+	return enable_kernelsu >= 1;
+}
+#else
+bool get_ksu_state(void)
+{
+	return true;
+}
+#endif /* CONFIG_KSU_CMDLINE */
 
 static struct workqueue_struct *ksu_workqueue;
 
@@ -36,11 +56,10 @@ int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,
 					    flags);
 }
 
-extern void ksu_sucompat_init(void);
-extern void ksu_sucompat_exit(void);
-extern void ksu_ksud_init(void);
-extern void ksu_ksud_exit(void);
-extern void ksu_supercalls_init(void);
+extern void ksu_sucompat_init();
+extern void ksu_sucompat_exit();
+extern void ksu_ksud_init();
+extern void ksu_ksud_exit();
 #ifdef CONFIG_KSU_TRACEPOINT_HOOK
 extern void ksu_trace_register();
 extern void ksu_trace_unregister();
@@ -48,22 +67,31 @@ extern void ksu_trace_unregister();
 
 int __init kernelsu_init(void)
 {
-	pr_info("Initialized on: %s (%s) with driver version: %u\n",
-		UTS_RELEASE, UTS_MACHINE, KSU_VERSION);
+	pr_info("kernelsu.enabled=%d\n", (int)get_ksu_state());
 
-#ifdef CONFIG_KSU_DEBUG
-	pr_alert("*************************************************************");
-	pr_alert("**     NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE    **");
-	pr_alert("**                                                         **");
-	pr_alert("**         You are running KernelSU in DEBUG mode          **");
-	pr_alert("**                                                         **");
-	pr_alert("**     NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE    **");
-	pr_alert("*************************************************************");
+#ifdef CONFIG_KSU_CMDLINE
+	if (!get_ksu_state()) {
+		pr_info_once("drivers is disabled.");
+		return 0;
+	}
 #endif
 
-	ksu_feature_init();
-
-	ksu_supercalls_init();
+#ifdef CONFIG_KSU_DEBUG
+	pr_alert(
+		"*************************************************************");
+	pr_alert(
+		"**     NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE    **");
+	pr_alert(
+		"**                                                         **");
+	pr_alert(
+		"**         You are running KernelSU in DEBUG mode          **");
+	pr_alert(
+		"**                                                         **");
+	pr_alert(
+		"**     NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE    **");
+	pr_alert(
+		"*************************************************************");
+#endif
 
 	ksu_core_init();
 
@@ -77,6 +105,8 @@ int __init kernelsu_init(void)
 
 #ifdef CONFIG_KSU_KPROBES_HOOK
 	ksu_ksud_init();
+#else
+	pr_debug("init ksu driver\n");
 #endif
 
 #ifdef CONFIG_KSU_TRACEPOINT_HOOK
@@ -93,11 +123,14 @@ int __init kernelsu_init(void)
 
 void kernelsu_exit(void)
 {
+#ifdef CONFIG_KSU_CMDLINE
+	if (!get_ksu_state()) {
+		return;
+	}
+#endif
 	ksu_allowlist_exit();
 
 	ksu_throne_tracker_exit();
-
-	ksu_observer_exit();
 
 	destroy_workqueue(ksu_workqueue);
 
@@ -112,7 +145,6 @@ void kernelsu_exit(void)
 	ksu_sucompat_exit();
 
 	ksu_core_exit();
-	ksu_feature_exit();
 }
 
 module_init(kernelsu_init);
@@ -122,10 +154,7 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("weishu");
 MODULE_DESCRIPTION("Android KernelSU");
 
+#include <linux/version.h>
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
-MODULE_IMPORT_NS("VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
-#else
 MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
-#endif
 #endif

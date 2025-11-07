@@ -64,7 +64,7 @@ static void remove_uid_from_arr(uid_t uid)
 	kfree(temp_arr);
 }
 
-static void init_default_profiles(void)
+static void init_default_profiles()
 {
 	kernel_cap_t full_cap = CAP_FULL_SET;
 
@@ -103,7 +103,7 @@ void ksu_show_allow_list(void)
 	struct perm_data *p = NULL;
 	struct list_head *pos = NULL;
 	pr_info("ksu_show_allow_list\n");
-	list_for_each (pos, &allow_list) {
+	list_for_each(pos, &allow_list) {
 		p = list_entry(pos, struct perm_data, list);
 		pr_info("uid :%d, allow: %d\n", p->profile.current_uid,
 			p->profile.allow_su);
@@ -111,7 +111,7 @@ void ksu_show_allow_list(void)
 }
 
 #ifdef CONFIG_KSU_DEBUG
-static void ksu_grant_root_to_shell(void)
+static void ksu_grant_root_to_shell()
 {
 	struct app_profile profile = {
 		.version = KSU_APP_PROFILE_VER,
@@ -131,7 +131,7 @@ bool ksu_get_app_profile(struct app_profile *profile)
 	struct list_head *pos = NULL;
 	bool found = false;
 
-	list_for_each (pos, &allow_list) {
+	list_for_each(pos, &allow_list) {
 		p = list_entry(pos, struct perm_data, list);
 		bool uid_match = profile->current_uid == p->profile.current_uid;
 		if (uid_match) {
@@ -188,7 +188,7 @@ bool ksu_set_app_profile(struct app_profile *profile, bool persist)
 		return false;
 	}
 
-	list_for_each (pos, &allow_list) {
+	list_for_each(pos, &allow_list) {
 		p = list_entry(pos, struct perm_data, list);
 		// both uid and package must match, otherwise it will break multiple package with different user id
 		if (profile->current_uid == p->profile.current_uid &&
@@ -330,7 +330,7 @@ struct root_profile *ksu_get_root_profile(uid_t uid)
 	struct perm_data *p = NULL;
 	struct list_head *pos = NULL;
 
-	list_for_each (pos, &allow_list) {
+	list_for_each(pos, &allow_list) {
 		p = list_entry(pos, struct perm_data, list);
 		if (uid == p->profile.current_uid && p->profile.allow_su) {
 			if (!p->profile.rp_config.use_default) {
@@ -348,7 +348,7 @@ bool ksu_get_allow_list(int *array, int *length, bool allow)
 	struct perm_data *p = NULL;
 	struct list_head *pos = NULL;
 	int i = 0;
-	list_for_each (pos, &allow_list) {
+	list_for_each(pos, &allow_list) {
 		p = list_entry(pos, struct perm_data, list);
 		// pr_info("get_allow_list uid: %d allow: %d\n", p->uid, p->allow);
 		if (p->profile.allow_su == allow) {
@@ -389,7 +389,7 @@ void do_save_allow_list(struct work_struct *work)
 		goto exit;
 	}
 
-	list_for_each (pos, &allow_list) {
+	list_for_each(pos, &allow_list) {
 		p = list_entry(pos, struct perm_data, list);
 		pr_info("save allow list, name: %s uid: %d, allow: %d\n",
 			p->profile.key, p->profile.current_uid,
@@ -469,7 +469,7 @@ void ksu_prune_allowlist(bool (*is_uid_valid)(uid_t, char *, void *),
 	bool modified = false;
 	// TODO: use RCU!
 	mutex_lock(&allowlist_mutex);
-	list_for_each_entry_safe (np, n, &allow_list, list) {
+	list_for_each_entry_safe(np, n, &allow_list, list) {
 		uid_t uid = np->profile.current_uid;
 		char *package = np->profile.key;
 		// we use this uid for special cases, don't prune it!
@@ -532,7 +532,7 @@ void ksu_allowlist_exit(void)
 
 	// free allowlist
 	mutex_lock(&allowlist_mutex);
-	list_for_each_entry_safe (np, n, &allow_list, list) {
+	list_for_each_entry_safe(np, n, &allow_list, list) {
 		list_del(&np->list);
 		kfree(np);
 	}
