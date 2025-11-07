@@ -1,27 +1,27 @@
-menu "Maxim Integrated Products, Inc. Charger support"
-
 config BATT_VERIFY_BY_DS28E16
-	tristate
+	bool
 	prompt "Support ds28e16 as encryption IC."
+	default n
 	help
-	  It needs a onewire physical controller to work.
+		It needs a onewire physical controller to work.
 
 config ONEWIRE_GPIO
-	tristate
+	bool
 	prompt "Support Onewire Driver."
+	default n
 	help
-	  It's an onewire driver.
+		It's an onewire driver.
 
 config BATT_VERIFY_BY_DS28E16_NABU
-	tristate
-	prompt "Support ds28e16 as encryption IC."
-	help
-	  It needs a onewire physical controller to work.
+        bool
+        prompt "Support ds28e16 as encryption IC."
+        default n
+        help
+                It needs a onewire physical controller to work.
 
 config ONEWIRE_GPIO_NABU
-	tristate
-	prompt "Support Onewire Driver."
-	help
-	  It's an onewire driver.
-
-endmenu
+        bool
+        prompt "Support Onewire Driver."
+        default n
+        help
+                It's an onewire driver.
