@@ -59,6 +59,62 @@ config IDT_P9220
 	  The driver controls idtp9220 via I2C and
 	  supports device-tree interface.
 
+config LN8282
+	tristate "LN8282 Charge Pump"
+	depends on I2C
+	help
+	  Say Y to include support for LN8282 charger pump.
+	  LN8282 is a charger pump chip.
+	  The driver supports charger enable/disable.
+	  The driver reports the charger status via the power supply framework.
+	  The driver controls 8282 via I2C and
+	  supports device-tree interface.
+
+config HALO_7221
+	tristate "HALO7221 Charge Pump"
+	depends on I2C
+	help
+	  Say Y to include support for HALO 7221 charger pump.
+	  HALO 7221 is a charger pump chip.
+	  The driver supports charger enable/disable.
+	  The driver reports the charger status via the power supply framework.
+	  The driver controls 7221 via I2C and
+	  supports device-tree interface.
+
+config RX1619_TRIM
+	tristate "RX1619 TRIM"
+	depends on I2C
+	help
+	  Say Y to include support for rx1619 wireless Charger.
+	  RX1619 is a wireless battery charger chip.
+	  The driver supports charger enable/disable.
+	  The driver reports the charger status via the power supply framework.
+	  The driver controls rx1619 via I2C and
+	  supports device-tree interface.
+
+config RX1619
+	tristate "RX1619 wireless Charger"
+	depends on I2C
+	help
+	  Say Y to include support for rx1619 wireless Charger.
+	  RX1619 is a wireless battery charger chip.
+	  The driver supports charger enable/disable.
+	  The driver reports the charger status via the power supply framework.
+	  The driver controls rx1619 via I2C and
+	  supports device-tree interface.
+
+
+config LN8282
+	tristate "LN8282 Charge Pump"
+	depends on I2C
+	help
+	  Say Y to include support for LN8282 charger pump.
+	  LN8282 is a charger pump chip.
+	  The driver supports charger enable/disable.
+	  The driver reports the charger status via the power supply framework.
+	  The driver controls 8282 via I2C and
+	  supports device-tree interface.
+
 config QPNP_SMB2
 	tristate "SMB2 Battery Charger"
 	depends on MFD_SPMI_PMIC
@@ -106,13 +162,13 @@ config QPNP_QNOVO
 	  and current measured during certain phases of the pulses.
 
 config QPNP_QNOVO5
-        bool "QPNP QNOVO5 driver"
-        depends on MFD_SPMI_PMIC
-        help
-          Say Y here to enable the Qnovo5 PBS-based pulse charging engine.
-          Qnovo5 driver accepts pulse parameters via sysfs entries and programs
-          the hardware module. It also allows userspace code to read diagnostics
-          of voltage and current measured during certain phases of the pulses.
+	bool "QPNP QNOVO5 driver"
+	depends on MFD_SPMI_PMIC
+	help
+	  Say Y here to enable the Qnovo5 PBS-based pulse charging engine.
+	  Qnovo5 driver accepts pulse parameters via sysfs entries and programs
+	  the hardware module. It also allows userspace code to read diagnostics
+	  of voltage and current measured during certain phases of the pulses.
 
 config SMB1390_CHARGE_PUMP
 	tristate "SMB1390 Charge Pump"
@@ -131,27 +187,14 @@ config SMB1390_CHARGE_PUMP_PSY
 	  SMB1390 is a div2 charge pump capable of delivering 6A charge current
 	  with very high efficiency.
 
-config SMB1398_CHARGER
-	tristate "SMB1398 power supply framework based driver"
-	depends on MFD_I2C_PMIC
+config FUEL_GAUGE_BQ27Z561
+	tristate "TI bq27z561 battery gauge driver"
 	help
-	  Say Y to include the support of SMB1398 Charge driver based on power
-	  supply framework.
-	  SMB1398 is a combo charger chip which can work in different modes:
-	  (1) DIV2 charge pump mode to work as a companion charger to be paired
-	      with Qualcomm Technologies, Inc.’s family of standalone chargers;
-	  (2) DIV2 and 3-level buck combo mode to regulate the output power from
-	      wireless charger receiver and provide the input for downstream
-	      chargers.
-config SMB358_CHARGER
-	tristate "SMB358 Battery Charger"
-	depends on I2C
+	  Say Y to enable support for TI bq27z561 fuel gauge driver
+
+config MI_SHA256_AUTHENTICATION
+	tristate "xiaomi battery and charging sha256 authentication"
 	help
-	  Say Y to include support for SMB358 Battery Charger.
-	  SMB358 is a single path switching mode charger capable of charging
-	  the battery with 2Amps of current.
-	  The driver supports charger enable/disable.
-	  The driver reports the charger status via the power supply framework.
-	  A charger status change triggers an IRQ via the device STAT pin.
+	  Say Y to enable support for sha256 authentication
 
 endmenu

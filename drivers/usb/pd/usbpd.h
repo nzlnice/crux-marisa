@@ -163,4 +163,6 @@ struct usbpd_vdm_data {
 #define USBPD_WEAK_PPS_POWER		18000000
 #define USBPD_WAKK_PPS_CURR_LIMIT	1500000
 
+#endif
+
 #endif /* _USBPD_H */

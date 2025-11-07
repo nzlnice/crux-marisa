@@ -1010,7 +1010,6 @@ static int pd_select_pdo_for_bq(struct usbpd *pd, int pdo_pos, int uv, int ua)
 
 	return 0;
 }
-#endif
 
 static int pd_eval_src_caps(struct usbpd *pd)
 {
