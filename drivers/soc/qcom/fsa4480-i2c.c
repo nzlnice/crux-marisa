@@ -1,4 +1,5 @@
-/* Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2019 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -10,6 +11,7 @@
  * GNU General Public License for more details.
  */
 
+#define DEBUG
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/power_supply.h>
@@ -22,6 +24,7 @@
 
 #define FSA4480_SWITCH_SETTINGS 0x04
 #define FSA4480_SWITCH_CONTROL  0x05
+#define FSA4480_SWITCH_STATUS0  0x06
 #define FSA4480_SWITCH_STATUS1  0x07
 #define FSA4480_SLOW_L          0x08
 #define FSA4480_SLOW_R          0x09
@@ -236,11 +239,8 @@ EXPORT_SYMBOL(fsa4480_reg_notifier);
 int fsa4480_unreg_notifier(struct notifier_block *nb,
 			     struct device_node *node)
 {
-	int rc = 0;
 	struct i2c_client *client = of_find_i2c_device_by_node(node);
 	struct fsa4480_priv *fsa_priv;
-	struct device *dev;
-	union power_supply_propval mode;
 
 	if (!client)
 		return -EINVAL;
@@ -248,27 +248,10 @@ int fsa4480_unreg_notifier(struct notifier_block *nb,
 	fsa_priv = (struct fsa4480_priv *)i2c_get_clientdata(client);
 	if (!fsa_priv)
 		return -EINVAL;
-	dev = fsa_priv->dev;
-	if (!dev)
-		return -EINVAL;
 
-	mutex_lock(&fsa_priv->notification_lock);
-	/* get latest mode within locked context */
-	rc = power_supply_get_property(fsa_priv->usb_psy,
-			POWER_SUPPLY_PROP_TYPEC_MODE, &mode);
-	if (rc) {
-		dev_dbg(dev, "%s: Unable to read USB TYPEC_MODE: %d\n",
-			__func__, rc);
-		goto done;
-	}
-	/* Do not reset switch settings for usb digital hs */
-	if (mode.intval != POWER_SUPPLY_TYPEC_SINK)
-		fsa4480_usbc_update_settings(fsa_priv, 0x18, 0x98);
-	rc = blocking_notifier_chain_unregister
+	fsa4480_usbc_update_settings(fsa_priv, 0x18, 0x98);
+	return blocking_notifier_chain_unregister
 					(&fsa_priv->fsa4480_notifier, nb);
-done:
-	mutex_unlock(&fsa_priv->notification_lock);
-	return rc;
 }
 EXPORT_SYMBOL(fsa4480_unreg_notifier);
 
@@ -319,7 +302,8 @@ int fsa4480_switch_event(struct device_node *node,
 		else
 			switch_control = 0x7;
 		fsa4480_usbc_update_settings(fsa_priv, switch_control, 0x9F);
-		break;
+		dev_dbg(fsa_priv->dev, "%s: switch_control = 0x%x\n", __func__, switch_control);
+		return 1;
 	case FSA_USBC_ORIENTATION_CC1:
 		fsa4480_usbc_update_settings(fsa_priv, 0x18, 0xF8);
 		return fsa4480_validate_display_port_settings(fsa_priv);
@@ -336,6 +320,31 @@ int fsa4480_switch_event(struct device_node *node,
 	return 0;
 }
 EXPORT_SYMBOL(fsa4480_switch_event);
+
+int fsa4480_get_direction(struct device_node *node)
+{
+	int switch_status = 0;
+	struct i2c_client *client = of_find_i2c_device_by_node(node);
+	struct fsa4480_priv *fsa_priv;
+
+	if (!client)
+		return -EINVAL;
+
+	fsa_priv = (struct fsa4480_priv *)i2c_get_clientdata(client);
+	if (!fsa_priv)
+		return -EINVAL;
+	if (!fsa_priv->regmap)
+		return -EINVAL;
+
+	regmap_read(fsa_priv->regmap, FSA4480_SWITCH_STATUS0, &switch_status);
+	switch_status >>= 4;
+	switch_status &= 0x3;
+	if (switch_status == 0 || switch_status == 1)
+		return 0;
+	else
+		return 1;
+}
+EXPORT_SYMBOL(fsa4480_get_direction);
 
 static void fsa4480_usbc_analog_work_fn(struct work_struct *work)
 {
