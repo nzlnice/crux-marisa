@@ -358,12 +358,18 @@ static void sbalance_wait(long poll_jiffies)
 	freezer_do_not_count();
 	__set_current_state(TASK_IDLE);
 	timer.task = current;
-	timer_setup_on_stack(&timer.timer, process_timeout, TIMER_DEFERRABLE);
+	
+	/* 修复：使用 timer_setup 替代已移除的 timer_setup_on_stack */
+	timer_setup(&timer.timer, process_timeout, TIMER_DEFERRABLE);
+	
 	timer.timer.expires = jiffies + poll_jiffies;
 	add_timer(&timer.timer);
 	schedule();
 	del_singleshot_timer_sync(&timer.timer);
-	destroy_timer_on_stack(&timer.timer);
+	
+	/* 修复：删除或注释掉已不存在的 destroy_timer_on_stack */
+	/* destroy_timer_on_stack(&timer.timer); */
+	
 	freezer_count();
 }
 

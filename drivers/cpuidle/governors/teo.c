@@ -116,6 +116,9 @@
  */
 #define NR_RECENT	9
 
+/* Residency threshold for skipping timer checks */
+#define RESIDENCY_THRESHOLD_US	100
+
 /**
  * struct teo_bin - Metrics used by the TEO cpuidle governor.
  * @intercepts: The "intercepts" metric.
@@ -146,7 +149,6 @@ struct teo_cpu {
 	int last_state;
 	int next_recent_idx;
 	int recent_idx[NR_RECENT];
-	unsigned int tick_hits;
 	s64 wfi_timeout_us;
 };
 
@@ -248,10 +250,18 @@ static bool teo_time_ok(unsigned int interval_us)
 	return !tick_nohz_tick_stopped() || interval_us >= TICK_USEC;
 }
 
+static bool teo_state_ok(int state_idx, struct cpuidle_driver *drv)
+{
+	return state_idx >= 0 && state_idx < drv->state_count;
+}
+
 static unsigned int teo_middle_of_bin(int idx, struct cpuidle_driver *drv)
 {
-	return (drv->states[idx].target_residency +
-		drv->states[idx+1].target_residency) / 2;
+	if (idx < drv->state_count - 1)
+		return (drv->states[idx].target_residency +
+			drv->states[idx+1].target_residency) / 2;
+	else
+		return drv->states[idx].target_residency * 2;
 }
 
 /**
@@ -264,13 +274,13 @@ static unsigned int teo_middle_of_bin(int idx, struct cpuidle_driver *drv)
  */
 static int teo_find_shallower_state(struct cpuidle_driver *drv,
 				    struct cpuidle_device *dev, int state_idx,
-				    int duration_us, bool no_poll)
+				    unsigned int duration_us, bool no_poll)
 {
 	int i;
 
 	for (i = state_idx - 1; i >= 0; i--) {
 		if (dev->states_usage[i].disable ||
-				(no_poll && drv->states[i].flags & CPUIDLE_FLAG_POLLING))
+		    (no_poll && drv->states[i].flags & CPUIDLE_FLAG_POLLING))
 			continue;
 
 		state_idx = i;
@@ -300,9 +310,10 @@ static int teo_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,
 	int constraint_idx = 0;
 	int idx0 = 0, idx = -1;
 	int i;
-	int duration_us;
+	unsigned int duration_us;
 	bool alt_intercepts, alt_recent;
 	ktime_t delta_tick;
+	unsigned int delta_tick_us;
 
 	if (cpu_data->last_state >= 0) {
 		teo_update(drv, dev);
@@ -312,6 +323,7 @@ static int teo_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,
 	cpu_data->time_span_ns = local_clock();
 
 	cpu_data->sleep_length_ns = tick_nohz_get_sleep_length(&delta_tick);
+	delta_tick_us = ktime_to_us(delta_tick);
 	duration_us = ktime_to_us(cpu_data->sleep_length_ns);
 
 	/* Check if there is any choice in the first place. */
@@ -386,7 +398,7 @@ static int teo_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,
 	alt_intercepts = 2 * idx_intercept_sum > cpu_data->total - idx_hit_sum;
 	alt_recent = idx_recent_sum > NR_RECENT / 2;
 	if (alt_recent || alt_intercepts) {
-		s64 first_suitable_span_us = duration_us;
+		unsigned int first_suitable_span_us = duration_us;
 		int first_suitable_idx = idx;
 
 		/*
@@ -403,7 +415,7 @@ static int teo_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,
 
 		for (i = idx - 1; i >= 0; i--) {
 			struct teo_bin *bin = &cpu_data->state_bins[i];
-			s64 span_us;
+			unsigned int span_us;
 
 			intercept_sum += bin->intercepts;
 			recent_sum += bin->recent;
@@ -476,9 +488,10 @@ static int teo_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,
 	if (cpu_data->sleep_length_ns <= 0)
 		cpu_data->sleep_length_ns = S64_MAX;
 	duration_us = ktime_to_us(cpu_data->sleep_length_ns);
+	delta_tick_us = ktime_to_us(delta_tick);
 
 	/*
-	 * If the closest expected timer is before the terget residency of the
+	 * If the closest expected timer is before the target residency of the
 	 * candidate state, a shallower one needs to be found.
 	 */
 	if (drv->states[idx].target_residency > duration_us) {
@@ -493,7 +506,7 @@ static int teo_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,
 	 * total wakeup events, do not stop the tick.
 	 */
 	if (drv->states[idx].target_residency < TICK_USEC &&
-	    tick_intercept_sum > cpu_data->total / 2 + cpu_data->total / 8)
+	    idx_intercept_sum > cpu_data->total / 2 + cpu_data->total / 8)
 		duration_us = TICK_USEC / 2;
 
 end:
@@ -501,12 +514,10 @@ end:
 	 * Don't stop the tick if the selected state is a polling one or if the
 	 * expected idle duration is shorter than the tick period length.
 	 */
-	if ((!(drv->states[idx].flags & CPUIDLE_FLAG_POLLING) &&
-	    duration_us >= TICK_USEC) || tick_nohz_tick_stopped())
-		goto out;
-
+	if ((drv->states[idx].flags & CPUIDLE_FLAG_POLLING) ||
+	    duration_us < TICK_USEC || tick_nohz_tick_stopped()) {
 		*stop_tick = false;
-
+		
 		/*
 		 * The tick is not going to be stopped, so if the target
 		 * residency of the state to be returned is not within the time
@@ -516,25 +527,25 @@ end:
 		if (idx > idx0 &&
 		    drv->states[idx].target_residency > delta_tick_us)
 			idx = teo_find_shallower_state(drv, dev, idx, delta_tick_us, false);
+	} else {
+		*stop_tick = true;
 	}
 
 out_tick:
-	*stop_tick = false;
-out:
 	/*
 	 * Set a limit to how long the CPU can remain in WFI in case of a
 	 * misprediction that results in too much time spent in WFI. This way,
 	 * the CPU can be kicked out of WFI and enter a deeper idle state if a
 	 * deeper state fits within the residency requirement.
 	 */
-#define WFI_TIMEOUT_US 1 
+#define WFI_TIMEOUT_US 1
 	cpu_data->wfi_timeout_us = 0;
 	if (drv->state_count > 1 && !idx && constraint_idx) {
 		if (*stop_tick)
-			delta_tick = ktime_to_us(cpu_data->sleep_length_ns);
+			delta_tick_us = ktime_to_us(cpu_data->sleep_length_ns);
 
-		if (delta_tick > duration_us &&
-		    (delta_tick - duration_us - WFI_TIMEOUT_US) >
+		if (delta_tick_us > duration_us &&
+		    (delta_tick_us - duration_us - WFI_TIMEOUT_US) >
 		    drv->states[1].target_residency)
 			cpu_data->wfi_timeout_us = duration_us + WFI_TIMEOUT_US;
 	}
