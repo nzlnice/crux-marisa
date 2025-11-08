@@ -7,7 +7,7 @@
  *
  ********************************************************/
 #define INPUT_DEV
-//#define TEST_RTP
+
 #define TEST_CONT_TO_RAM
 /*********************************************************
  *
@@ -318,7 +318,6 @@ struct aw8697 {
 	int enable_pin_control;
 	struct work_struct vibrator_work;
 	struct work_struct rtp_work;
-	struct work_struct set_gain_work;
 	struct delayed_work ram_work;
 
 	struct fileops fileops;
@@ -330,8 +329,6 @@ struct aw8697 {
 	unsigned long int microsecond;
 	unsigned int sys_frequency;
 	unsigned int rtp_len;
-	unsigned int lra_calib_data;
-	unsigned int f0_calib_data;
 
 	int reset_gpio;
 	int irq_gpio;
@@ -352,7 +349,6 @@ struct aw8697 {
 	int index;
 	int vmax;
 	int gain;
-	u16 new_gain;
 	unsigned char level;
 
 	unsigned char seq[AW8697_SEQUENCER_SIZE];
@@ -369,7 +365,6 @@ struct aw8697 {
 	unsigned char max_pos_beme;
 	unsigned char max_neg_beme;
 	unsigned char f0_cali_flag;
-	unsigned int osc_cali_run;
 
 	unsigned char ram_vbat_comp;
 	unsigned int vbat;
@@ -381,9 +376,8 @@ struct aw8697 {
 	struct aw8697_dts_info info;
 	atomic_t is_in_rtp_loop;
 	atomic_t exit_in_rtp_loop;
-	atomic_t is_in_write_loop;
-	wait_queue_head_t wait_q;//wait queue for exit irq mode
-	wait_queue_head_t stop_wait_q;  //wait queue for stop rtp mode
+	wait_queue_head_t wait_q;
+	wait_queue_head_t stop_wait_q;
 	struct workqueue_struct *work_queue;
 
 #ifdef INPUT_DEV
@@ -401,7 +395,6 @@ struct aw8697 {
 	struct hrtimer hap_disable_timer;
 	struct hrtimer timer;	/*test used  ,del */
 	struct dentry *hap_debugfs;
-	struct mutex rtp_lock;
 	spinlock_t bus_lock;
 	ktime_t last_sc_time;
 	int play_irq;
@@ -415,7 +408,6 @@ struct aw8697 {
 	int effect_type;
 	int effect_id;
 	int test_val;
-	int is_custom_wave;
 #endif
 };
 
