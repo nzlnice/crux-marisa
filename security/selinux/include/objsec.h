@@ -26,6 +26,7 @@
 #include <linux/in.h>
 #include <linux/spinlock.h>
 #include <net/net_namespace.h>
+#include <net/sock.h>  // 添加这行，包含 sock.h
 #include "flask.h"
 #include "avc.h"
 
@@ -116,21 +117,7 @@ struct netport_security_struct {
 	u8 protocol;			/* transport protocol */
 };
 
-struct sk_security_struct {
-#ifdef CONFIG_NETLABEL
-	enum {				/* NetLabel state */
-		NLBL_UNSET = 0,
-		NLBL_REQUIRE,
-		NLBL_LABELED,
-		NLBL_REQSKB,
-		NLBL_CONNLABELED,
-	} nlbl_state;
-	struct netlbl_lsm_secattr *nlbl_secattr; /* NetLabel sec attributes */
-#endif
-	u32 sid;			/* SID of this object */
-	u32 peer_sid;			/* SID of peer */
-	u16 sclass;			/* sock security class */
-};
+// 完全删除 sk_security_struct 定义，使用 sock.h 中的定义
 
 struct tun_security_struct {
 	u32 sid;			/* SID for the tun device sockets */

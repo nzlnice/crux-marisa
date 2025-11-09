@@ -218,8 +218,10 @@ static inline void __bpf_spin_lock(struct bpf_spin_lock *lock)
 	atomic_t *l = (void *)lock;
 	BUILD_BUG_ON(sizeof(*l) != sizeof(*lock));
 	do {
-		atomic_cond_read_relaxed(l, !VAL);
-	} while (atomic_xchg(l, 1));
+		/* 替换 atomic_cond_read_relaxed 为兼容的实现 */
+		while (atomic_read(l) != 0)
+			cpu_relax();
+	} while (atomic_cmpxchg(l, 0, 1) != 0);
 }
 
 static inline void __bpf_spin_unlock(struct bpf_spin_lock *lock)

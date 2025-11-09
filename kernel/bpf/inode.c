@@ -362,10 +362,12 @@ static int bpf_obj_do_pin(const struct filename *pathname, void *raw,
 
 	switch (type) {
 	case BPF_TYPE_PROG:
-		ret = vfs_mkobj(dentry, mode, bpf_mkprog, raw);
+		// 直接调用 bpf_mkprog 而不是通过 vfs_mkobj
+		ret = bpf_mkprog(dentry, mode, raw);
 		break;
 	case BPF_TYPE_MAP:
-		ret = vfs_mkobj(dentry, mode, bpf_mkmap, raw);
+		// 直接调用 bpf_mkmap 而不是通过 vfs_mkobj
+		ret = bpf_mkmap(dentry, mode, raw);
 		break;
 	default:
 		ret = -EPERM;
