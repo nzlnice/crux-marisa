@@ -2858,4 +2858,19 @@ static inline void sched_irq_work_queue(struct irq_work *work)
 	else
 		irq_work_queue_on(work, cpumask_any(cpu_online_mask));
 }
+
+/*
+ * task_is_booster - Check if a task should be considered a booster task
+ * @p: task to check
+ *
+ * Returns: true if the task is considered a booster task
+ */
+static inline bool task_is_booster(struct task_struct *p)
+{
+    if (!p)
+        return false;
+    
+    /* 简单实现：总是返回 false */
+    return false;
+}
 #endif

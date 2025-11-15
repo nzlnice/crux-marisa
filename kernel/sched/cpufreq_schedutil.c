@@ -21,6 +21,9 @@
 
 #define SUGOV_KTHREAD_PRIORITY	50
 
+/* 添加 task_is_booster 函数声明 */
+extern bool task_is_booster(struct task_struct *p);
+
 struct sugov_tunables {
 	struct gov_attr_set attr_set;
 	unsigned int		up_rate_limit_us;

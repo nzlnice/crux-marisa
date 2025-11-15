@@ -35,6 +35,19 @@
 
 #include "drm_crtc_internal.h"
 
+#include <linux/input.h>
+#include <linux/jiffies.h>
+
+extern unsigned long last_input_time;
+
+#ifndef DEVFREQ_MSM_CPUBW
+#define DEVFREQ_MSM_CPUBW 0
+#endif
+
+#ifndef DEVFREQ_MSM_LLCCBW
+#define DEVFREQ_MSM_LLCCBW 1
+#endif
+
 void __drm_crtc_commit_free(struct kref *kref)
 {
 	struct drm_crtc_commit *commit =
@@ -2248,12 +2261,14 @@ static int __drm_mode_atomic_ioctl(struct drm_device *dev, void *data,
 			(arg->flags & DRM_MODE_PAGE_FLIP_EVENT))
 		return -EINVAL;
 
-	if (!(arg->flags & DRM_MODE_ATOMIC_TEST_ONLY)) {
-		//7000ms covers long scrolls after input boosting is no longer used
+if (!(arg->flags & DRM_MODE_ATOMIC_TEST_ONLY)) {
+		/* 7000ms covers long scrolls after input boosting is no longer used */
+		/*
 		if (time_before(jiffies, last_input_time + msecs_to_jiffies(7000))) {
 			devfreq_boost_kick(DEVFREQ_MSM_CPUBW);
 			devfreq_boost_kick(DEVFREQ_MSM_LLCCBW);
 		}
+		*/
 	}
 
 	drm_modeset_acquire_init(&ctx, 0);

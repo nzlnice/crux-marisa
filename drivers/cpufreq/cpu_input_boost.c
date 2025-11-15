@@ -19,6 +19,9 @@
 #include <uapi/linux/sched/types.h>
 #endif
 
+/* 添加 kp_active_mode 函数声明 */
+int kp_active_mode(void);
+
 static unsigned int input_boost_freq_little __read_mostly =
 	CONFIG_INPUT_BOOST_FREQ_LP;
 static unsigned int input_boost_freq_big __read_mostly =
@@ -88,7 +91,6 @@ static struct boost_drv boost_drv_g __read_mostly = {
 	.boost_waitq = __WAIT_QUEUE_HEAD_INITIALIZER(boost_drv_g.boost_waitq)
 };
 
-extern int kp_active_mode(void);
 static unsigned int get_input_boost_freq(struct cpufreq_policy *policy)
 {
 	unsigned int freq;
@@ -313,10 +315,10 @@ static int msm_drm_notifier_cb(struct notifier_block *nb, unsigned long action,
 		return NOTIFY_OK;
 
 	/* Boost when the screen turns on and unboost when it turns off */
-	if (*blank == MSM_DRM_BLANK_UNBLANK_CUST) {
+	if (*blank == MSM_DRM_BLANK_UNBLANK) {
 		set_bit(SCREEN_ON, &b->state);
 		__cpu_input_boost_kick_max(b, wake_boost_duration, true);
-	} else if (*blank == MSM_DRM_BLANK_POWERDOWN_CUST) {
+	} else if (*blank == MSM_DRM_BLANK_POWERDOWN) {
 		clear_bit(SCREEN_ON, &b->state);
 		wake_up(&b->boost_waitq);
 	}
@@ -438,7 +440,7 @@ static int __init cpu_input_boost_init(void)
 		goto unregister_handler;
 	}
 
-	thread = kthread_run_perf_critical(cpu_perf_mask, cpu_boost_thread, b, "cpu_boostd");
+	thread = kthread_run(cpu_boost_thread, b, "cpu_boostd");
 	if (IS_ERR(thread)) {
 		ret = PTR_ERR(thread);
 		pr_debug("Failed to start CPU boost thread, err: %d\n", ret);
@@ -456,3 +458,15 @@ unregister_cpu_notif:
 	return ret;
 }
 subsys_initcall(cpu_input_boost_init);
+
+/**
+ * kp_active_mode - Get current kernel performance mode
+ *
+ * Returns: current performance mode (0 = normal, 1 = power save, etc.)
+ */
+int kp_active_mode(void)
+{
+    /* 简单实现：总是返回 0（正常模式） */
+    return 0;
+}
+EXPORT_SYMBOL(kp_active_mode);
