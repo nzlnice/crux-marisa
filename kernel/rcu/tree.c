@@ -62,6 +62,9 @@
 #include "tree.h"
 #include "rcu.h"
 
+#include <linux/sched.h>
+#include <linux/sched/rt.h>
+
 #ifdef MODULE_PARAM_PREFIX
 #undef MODULE_PARAM_PREFIX
 #endif
@@ -3958,7 +3961,7 @@ static int __init rcu_spawn_gp_kthread(void)
 	int kthread_prio_in = kthread_prio;
 	struct rcu_node *rnp;
 	struct rcu_state *rsp;
-	struct sched_param sp;
+	// struct sched_param sp;  // 删除这行，因为变量未使用
 	struct task_struct *t;
 
 	/* Force priority into range. */
@@ -3980,7 +3983,11 @@ static int __init rcu_spawn_gp_kthread(void)
 		raw_spin_lock_irqsave_rcu_node(rnp, flags);
 		rsp->gp_kthread = t;
 		if (kthread_prio) {
-			sched_set_fifo(t);
+			// 替换 sched_set_fifo(t);
+			struct sched_param param = {
+				.sched_priority = kthread_prio
+			};
+			sched_setscheduler_nocheck(t, SCHED_FIFO, &param);
 		}
 		raw_spin_unlock_irqrestore_rcu_node(rnp, flags);
 		wake_up_process(t);

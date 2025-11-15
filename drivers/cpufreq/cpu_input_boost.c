@@ -63,6 +63,7 @@ module_param(input_boost_duration, short, 0644);
 module_param(wake_boost_duration, short, 0644);
 
 unsigned long last_input_time;
+unsigned long last_mb_time; 
 
 enum {
 	SCREEN_ON,
@@ -248,7 +249,10 @@ static int cpu_boost_thread(void *data)
 	struct boost_drv *b = data;
 	unsigned long old_state = 0;
 
-	sched_set_fifo(current);
+	struct sched_param param = {
+        .sched_priority = MAX_RT_PRIO - 1
+        };
+        sched_setscheduler_nocheck(current, SCHED_FIFO, &param);
 
 	while (1) {
 		bool should_stop = false;
@@ -306,7 +310,7 @@ static int msm_drm_notifier_cb(struct notifier_block *nb, unsigned long action,
 {
 	struct boost_drv *b = container_of(nb, typeof(*b), msm_drm_notif);
 	struct msm_drm_notifier *evdata = data;
-	int *blank = evdata->data;
+	int *blank __maybe_unused = evdata->data;
 
 	/* Parse framebuffer blank events as soon as they occur */
 	if (action != MSM_DRM_EARLY_EVENT_BLANK)

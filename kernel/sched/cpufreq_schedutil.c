@@ -18,6 +18,8 @@
 #include <trace/events/power.h>
 #include <linux/sched/sysctl.h>
 #include "sched.h"
+#include <linux/sched.h>
+#include <linux/sched/rt.h>
 
 #define SUGOV_KTHREAD_PRIORITY	50
 
@@ -927,7 +929,6 @@ static int sugov_kthread_create(struct sugov_policy *sg_policy)
 {
 	struct task_struct *thread;
 	struct cpufreq_policy *policy = sg_policy->policy;
-	int ret;
 
 	/* kthread only required for slow path */
 	if (policy->fast_switch_enabled)
@@ -943,7 +944,10 @@ static int sugov_kthread_create(struct sugov_policy *sg_policy)
 		return PTR_ERR(thread);
 	}
 
-	sched_set_fifo(thread);
+	struct sched_param param = {
+         .sched_priority = MAX_RT_PRIO - 1
+        };
+        sched_setscheduler_nocheck(thread, SCHED_FIFO, &param);
 
 	sg_policy->thread = thread;
 
