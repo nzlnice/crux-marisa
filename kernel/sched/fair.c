@@ -35,6 +35,7 @@
 #include <linux/task_work.h>
 
 #include <trace/events/sched.h>
+#include <linux/sched/idle.h>
 
 #include "sched.h"
 #include "tune.h"
@@ -6983,7 +6984,7 @@ find_idlest_group_cpu(struct sched_group *group, struct task_struct *p, int this
 
 	/* Traverse only the allowed CPUs */
 	for_each_cpu_and(i, sched_group_span(group), &p->cpus_allowed) {
-		if (sched_idle_cpu(i))
+		if (available_idle_cpu(i))
 			return i;
 
 		if (available_idle_cpu(i)) {
@@ -7238,7 +7239,7 @@ static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, int t
 			return -1;
 		if (cpu_isolated(cpu))
 			continue;
-		if (available_idle_cpu(cpu) || sched_idle_cpu(cpu))
+		if (available_idle_cpu(cpu) || idle_cpu(cpu))
 			break;
 	}
 
@@ -7258,13 +7259,13 @@ static inline int __select_idle_sibling(struct task_struct *p, int prev, int tar
 	struct sched_domain *sd;
 	int i;
 
-	if ((available_idle_cpu(target) && !cpu_isolated(target)) || sched_idle_cpu(target))
+	if ((available_idle_cpu(target) && !cpu_isolated(target)) || idle_cpu(target))
 		return target;
 
 	/*
 	 * If the previous cpu is cache affine and idle, don't be stupid.
 	 */
-	if ((prev != target && cpus_share_cache(prev, target) && available_idle_cpu(prev) && !cpu_isolated(prev)) || sched_idle_cpu(prev))
+	if ((prev != target && cpus_share_cache(prev, target) && available_idle_cpu(prev) && !cpu_isolated(prev)) || idle_cpu(prev))
 		return prev;
 
 	sd = rcu_dereference(per_cpu(sd_llc, target));
